@@ -67,7 +67,8 @@ public sealed class HostMod : IMod, IScriptHost, IModDependents
         var packs = new PackHost(Path.Combine(context.Folder, "packs"), () => WorldSnapshot.Hours, () => WorldSnapshot.SelectedName,
             () => WorldSnapshot.Squad, () => WorldSnapshot.Cats,
             () => new ScriptLimits { InstructionsPerCall = (long)(Settings.ReplBudgetK * 1000), InstructionsPerTick = long.MaxValue / 4 },
-            ReplWindow.Session.Core.Out, Line, modsRoot, selfFolder, Path.Combine(context.Folder, "packs.grants.json"));
+            ReplWindow.Session.Core.Out, Line, modsRoot, selfFolder, Path.Combine(context.Folder, "packs.grants.json"),
+            () => WorldSnapshot.Scan, WorldSnapshot.EnqueueAction, Path.Combine(context.Folder, "pack_states"));
         ReplWindow.Session.Core.Packs = packs;
         foreach (var (m, _, _, _) in packs.List())
             if (!m.ThirdParty || Settings.AutoStartThirdPartyPacks) packs.Start(m.Id);

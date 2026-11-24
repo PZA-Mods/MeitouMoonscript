@@ -2,7 +2,7 @@
 
 ![MeitouMoonscript](docs/media/cover.jpg)
 
-> **Version 0.3.0** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
+> **Version 0.4.0** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
 
 | Hotkey / Command | What |
 |---|---|
@@ -36,7 +36,8 @@ See **[docs/MODDER-GUIDE.md](docs/MODDER-GUIDE.md)** for the full pack & API gui
 ## Zero-C# Lua Packs & Security Model
 
 - **Cross-mod discovery**: Any Meitou mod can include `moonscript/<pack-id>/pack.json` + `main.lua`.
-- **Opt-in permissions (`/allow`, `/revoke`)**: Third-party packs stay stopped until approved with `/allow <pack> all` (persisted in `packs.grants.json`). `PackHost` enforces least-privilege API exposure—only the capabilities declared and approved (`commands`, `timers`, `events`, `world.read`) are exposed to that pack.
+- **Opt-in permissions (`/allow`, `/revoke`)**: Third-party packs stay stopped until approved with `/allow <pack> all` (persisted in `packs.grants.json`). `PackHost` enforces least-privilege API exposure—only the capabilities declared and approved (`commands`, `timers`, `events`, `world.read`, `world.scan`, `world.control`, `pack.save`) are exposed to that pack.
+- **World sensors, actuators & persistence (`0.4.0`)**: Opt-in `world.scan` (`world.characters`, `world.doors`, `world.buildings`), rate-limited `world.control` (max 16 actions/tick queued onto `World.Commands`: `doors.*`, `orders.*`, `world.floater`), and `pack.save` (C7-safe state persistence) enable pure-Lua base automation, raid alarms, and custom squad logic.
 - **Hardened isolation**:
   - Symlinks/junctions and path escapes (`..`) are rejected by `SafePath`.
   - Reserved terminal commands cannot be shadowed; colliding pack commands are namespaced as `/<pack-id>:<cmd>`.

@@ -27,12 +27,14 @@ public sealed record GameEvent(string Name, IReadOnlyDictionary<string, object?>
 public sealed class PackHost
 {
     public const long GlobalTickBudget = 800_000;
+    public const int MaxActionsPerTick = 16;
+    public const int MaxPackSaveBytes = 256 * 1024;
 
     public static readonly IReadOnlyList<string> DefaultPermissions = ["commands", "timers", "world.read"];
 
     public static readonly HashSet<string> SafePermissions = new(StringComparer.OrdinalIgnoreCase)
     {
-        "commands", "timers", "events", "world.read",
+        "commands", "timers", "events", "world.read", "world.scan", "world.control", "pack.save",
     };
 
     static readonly HashSet<string> ReservedCommands = new(StringComparer.OrdinalIgnoreCase)
@@ -49,10 +51,13 @@ public sealed class PackHost
     readonly string? _modsRoot;
     readonly string? _selfModFolderName;
     readonly string? _grantsPath;
+    readonly string? _stateDir;
     readonly Func<double?> _hours;
     readonly Func<string?> _selected;
     readonly Func<IReadOnlyList<FighterSnap>> _squad;
     readonly Func<long?> _cats;
+    readonly Func<WorldScanSnapshot>? _scan;
+    readonly Action<WorldAction>? _enqueueAction;
     readonly Func<ScriptLimits> _limits;
     readonly Action<string, Ink> _out;
     readonly Action<string> _log;
@@ -81,6 +86,9 @@ public sealed class PackHost
         public LuaBox? Box;
         public bool Running;
         public string? Error;
+        public int ActionsThisTick;
+        public bool CanSave;
+        public bool SaveRequested;
         public List<string> Commands { get; } = [];
         public List<TimerEntry> Timers { get; } = [];
         public Dictionary<string, List<DynValue>> Events { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -88,10 +96,12 @@ public sealed class PackHost
 
     public PackHost(string packsDir, Func<double?> hours, Func<string?> selected, Func<IReadOnlyList<FighterSnap>> squad,
                     Func<long?> cats, Func<ScriptLimits> limits, Action<string, Ink> output, Action<string> log,
-                    string? modsRoot = null, string? selfModFolderName = null, string? grantsPath = null)
+                    string? modsRoot = null, string? selfModFolderName = null, string? grantsPath = null,
+                    Func<WorldScanSnapshot>? scan = null, Action<WorldAction>? enqueueAction = null, string? stateDir = null)
     {
         _packsDir = packsDir; _modsRoot = modsRoot; _selfModFolderName = selfModFolderName; _grantsPath = grantsPath;
         _hours = hours; _selected = selected; _squad = squad; _cats = cats;
+        _scan = scan; _enqueueAction = enqueueAction; _stateDir = stateDir;
         _limits = limits; _out = output; _log = log;
         LoadGrants();
         Discover();
@@ -278,9 +288,31 @@ public sealed class PackHost
             box.Expose("", "every", a => RegisterTimer(p, a, repeat: true));
         }
         if (granted.Contains("events")) box.Expose("", "on", a => RegisterEvent(p, a));
+        if (granted.Contains("world.scan"))
+        {
+            box.Expose("world", "characters", a => ScanCharacters(box.RawScript, a));
+            box.Expose("world", "doors", a => ScanDoors(box.RawScript, a));
+            box.Expose("world", "buildings", a => ScanBuildings(box.RawScript, a));
+        }
+        if (granted.Contains("world.control"))
+        {
+            box.Expose("doors", "toggle", a => QueueDoor(p, "door.toggle", a, hasFlag: false));
+            box.Expose("doors", "set_open", a => QueueDoor(p, "door.set_open", a, hasFlag: true));
+            box.Expose("doors", "toggle_lock", a => QueueDoor(p, "door.toggle_lock", a, hasFlag: false));
+            box.Expose("doors", "set_locked", a => QueueDoor(p, "door.set_locked", a, hasFlag: true));
+            box.Expose("orders", "move", a => QueueMove(p, a));
+            box.Expose("orders", "stop", a => QueueStop(p, a));
+            box.Expose("orders", "follow", a => QueueFollow(p, a));
+            box.Expose("orders", "attack", a => QueueAttack(p, a));
+            box.Expose("orders", "squad_ai", a => QueueSquadAi(p, a));
+            box.Expose("world", "floater", a => QueueFloater(p, a));
+        }
+        p.CanSave = granted.Contains("pack.save");
+        if (p.CanSave) box.Expose("pack", "save", _ => { p.SaveRequested = true; return DynValue.True; });
 
         p.Box = box;
         p.Error = null;
+        p.ActionsThisTick = 0;
         p.Commands.Clear();
         p.Timers.Clear();
         p.Events.Clear();
@@ -291,6 +323,7 @@ public sealed class PackHost
             Stop(id);
             return (false, $"pack '{id}' failed: {p.Error}");
         }
+        if (p.CanSave) LoadPackState(p);
         p.Running = true;
         string cmds = p.Commands.Count > 0 ? " (commands: " + string.Join(", ", p.Commands.Select(c => "/" + c)) + ")" : "";
         return (true, $"started pack '{id}' v{p.Manifest.Version}{cmds}");
@@ -299,6 +332,7 @@ public sealed class PackHost
     public (bool ok, string message) Stop(string id)
     {
         if (!_packs.TryGetValue(id, out var p)) return (false, $"unknown pack '{id}'");
+        if (p.Running && p.CanSave && p.Box is { Faulted: false }) SavePackState(p);
         var mine = _commands.Where(kv => ReferenceEquals(kv.Value.Pack, p)).Select(kv => kv.Key).ToList();
         foreach (var k in mine) _commands.Remove(k);
         p.Commands.Clear();
@@ -306,6 +340,7 @@ public sealed class PackHost
         p.Events.Clear();
         p.Box = null;
         p.Running = false;
+        p.CanSave = false;
         return (true, $"stopped pack '{id}'");
     }
 
@@ -323,6 +358,7 @@ public sealed class PackHost
         if (!_commands.TryGetValue(name, out var reg)) return false;
         var p = reg.Pack;
         if (!p.Running || p.Box is null) { error = $"pack '{p.Manifest.Id}' is not running"; return true; }
+        p.ActionsThisTick = 0;
         var box = p.Box;
         box.RawScript.Globals["__cmd_fn"] = reg.Fn;
         box.RawScript.Globals["__cmd_arg"] = DynValue.NewString(arg);
@@ -337,12 +373,18 @@ public sealed class PackHost
         {
             error = box.LastError;
         }
+        else if (p.SaveRequested)
+        {
+            p.SaveRequested = false;
+            SavePackState(p);
+        }
         return true;
     }
 
     /// <summary>Advance deterministic game-clock timers and deliver queued game events under a single global per-tick budget.</summary>
     public void Tick(double? gameHours, IReadOnlyList<GameEvent>? events = null)
     {
+        foreach (var ps in _packs.Values) ps.ActionsThisTick = 0;
         long used = 0;
         if (gameHours is double now && double.IsFinite(now))
         {
@@ -381,6 +423,12 @@ public sealed class PackHost
                 used += DeliverEvent(ev, GlobalTickBudget - used);
             }
         }
+        foreach (var p in _packs.Values)
+            if (p.Running && p.CanSave && p.SaveRequested && p.Box is { Faulted: false })
+            {
+                p.SaveRequested = false;
+                SavePackState(p);
+            }
         LastTickInstructions = used;
     }
 
@@ -476,5 +524,245 @@ public sealed class PackHost
         if (!p.Events.TryGetValue(name, out var list)) p.Events[name] = list = [];
         list.Add(a[1]);
         return DynValue.True;
+    }
+
+    // ---------------------------------------------------------------- world.scan (0.4.0 sensors)
+
+    DynValue ScanCharacters(Script s, CallbackArguments a)
+    {
+        var snap = _scan?.Invoke() ?? WorldScanSnapshot.Empty;
+        bool hasCenter = a.Count >= 3 && a[0].Type == DataType.Number && a[1].Type == DataType.Number && a[2].Type == DataType.Number;
+        double cx = hasCenter ? a[0].Number : 0, cy = hasCenter ? a[1].Number : 0, r = hasCenter ? Math.Max(0, a[2].Number) : 0;
+        double r2 = r * r;
+        string filter = "";
+        if (hasCenter && a.Count >= 4 && a[3].Type == DataType.String) filter = a[3].String.Trim().ToLowerInvariant();
+        else if (!hasCenter && a.Count >= 1 && a[0].Type == DataType.String) filter = a[0].String.Trim().ToLowerInvariant();
+
+        var arr = new Table(s);
+        int idx = 0;
+        foreach (var c in snap.Characters)
+        {
+            if (filter == "player" && !c.IsPlayer) continue;
+            if (filter == "npc" && c.IsPlayer) continue;
+            if (filter == "alive" && c.Dead) continue;
+            if (filter == "combat" && !c.InCombat) continue;
+            double dist = 0;
+            if (hasCenter)
+            {
+                double dx = c.X - cx, dz = c.Z - cy;
+                double d2 = dx * dx + dz * dz;
+                if (d2 > r2) continue;
+                dist = Math.Sqrt(d2);
+            }
+            var t = new Table(s);
+            t["slot"] = c.Slot; t["gen"] = c.Gen; t["name"] = c.Name;
+            t["faction"] = c.Faction; t["is_player"] = c.IsPlayer;
+            t["x"] = c.X; t["y"] = c.Y; t["z"] = c.Z; t["dist"] = dist;
+            t["hp"] = c.Hp; t["down"] = c.Down; t["dead"] = c.Dead;
+            t["in_combat"] = c.InCombat; t["squad_id"] = c.SquadId;
+            arr[++idx] = t;
+        }
+        return DynValue.NewTable(arr);
+    }
+
+    DynValue ScanDoors(Script s, CallbackArguments a)
+    {
+        var snap = _scan?.Invoke() ?? WorldScanSnapshot.Empty;
+        bool onlyPlayer = a.Count >= 1 && a[0].Type == DataType.Boolean && a[0].Boolean;
+        var arr = new Table(s);
+        int idx = 0;
+        foreach (var d in snap.Doors)
+        {
+            if (onlyPlayer && !d.IsPlayer) continue;
+            var t = new Table(s);
+            t["id"] = d.Id; t["building"] = d.Building; t["owner"] = d.Owner; t["is_player"] = d.IsPlayer;
+            t["x"] = d.X; t["y"] = d.Y; t["z"] = d.Z;
+            t["open_amount"] = d.OpenAmount; t["motion"] = d.Motion;
+            t["locked"] = d.Locked; t["broken"] = d.Broken; t["is_gate"] = d.IsGate;
+            arr[++idx] = t;
+        }
+        return DynValue.NewTable(arr);
+    }
+
+    DynValue ScanBuildings(Script s, CallbackArguments a)
+    {
+        var snap = _scan?.Invoke() ?? WorldScanSnapshot.Empty;
+        bool onlyPlayer = a.Count >= 1 && a[0].Type == DataType.Boolean && a[0].Boolean;
+        var arr = new Table(s);
+        int idx = 0;
+        foreach (var b in snap.Buildings)
+        {
+            if (onlyPlayer && !b.IsPlayer) continue;
+            var t = new Table(s);
+            t["id"] = b.Id; t["name"] = b.Name; t["record"] = b.Record;
+            t["owner"] = b.Owner; t["is_player"] = b.IsPlayer;
+            t["x"] = b.X; t["y"] = b.Y; t["z"] = b.Z;
+            t["complete"] = b.Complete; t["progress"] = b.Progress;
+            arr[++idx] = t;
+        }
+        return DynValue.NewTable(arr);
+    }
+
+    // ---------------------------------------------------------------- world.control (0.4.0 rate-limited actuators)
+
+    bool TrySpendAction(PackState p)
+    {
+        if (_enqueueAction is null) return false;
+        if (p.ActionsThisTick >= MaxActionsPerTick) return false;
+        p.ActionsThisTick++;
+        return true;
+    }
+
+    DynValue QueueDoor(PackState p, string kind, CallbackArguments a, bool hasFlag)
+    {
+        if (a.Count < (hasFlag ? 2 : 1) || a[0].Type != DataType.String)
+            throw new ScriptRuntimeException($"{kind}: expected building id string" + (hasFlag ? " and boolean" : ""));
+        string bld = a[0].String.Trim();
+        if (bld.Length == 0 || bld.Length > 128) throw new ScriptRuntimeException($"{kind}: invalid building id");
+        bool flag = hasFlag && a[1].CastToBool();
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction(kind, TargetId: bld, Flag: flag));
+        return DynValue.True;
+    }
+
+    static List<(int Slot, int Gen)> ParseCharIds(DynValue v, string who)
+    {
+        var list = new List<(int, int)>();
+        if (v.Type != DataType.Table) throw new ScriptRuntimeException($"{who}: expected a character table {{slot, gen}} or array of them");
+        var t = v.Table;
+        if (t.Get("slot").Type == DataType.Number && t.Get("gen").Type == DataType.Number)
+        {
+            list.Add(((int)t.Get("slot").Number, (int)t.Get("gen").Number));
+            return list;
+        }
+        int len = Math.Min(t.Length, 32);
+        for (int i = 1; i <= len; i++)
+        {
+            var item = t.Get(i);
+            if (item.Type == DataType.Table && item.Table.Get("slot").Type == DataType.Number && item.Table.Get("gen").Type == DataType.Number)
+                list.Add(((int)item.Table.Get("slot").Number, (int)item.Table.Get("gen").Number));
+        }
+        if (list.Count == 0) throw new ScriptRuntimeException($"{who}: no valid {{slot, gen}} character ids found");
+        return list;
+    }
+
+    static (int Slot, int Gen) ParseSingleChar(DynValue v, string who)
+    {
+        if (v.Type != DataType.Table || v.Table.Get("slot").Type != DataType.Number || v.Table.Get("gen").Type != DataType.Number)
+            throw new ScriptRuntimeException($"{who}: expected target character table {{slot, gen}}");
+        return ((int)v.Table.Get("slot").Number, (int)v.Table.Get("gen").Number);
+    }
+
+    static double FiniteNum(DynValue v, string who)
+    {
+        if (v.Type != DataType.Number || !double.IsFinite(v.Number))
+            throw new ScriptRuntimeException($"{who}: expected finite number");
+        return v.Number;
+    }
+
+    DynValue QueueMove(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 4) throw new ScriptRuntimeException("orders.move(chars, x, y, z) expects 4 arguments");
+        var ids = ParseCharIds(a[0], "orders.move");
+        double x = FiniteNum(a[1], "orders.move"), y = FiniteNum(a[2], "orders.move"), z = FiniteNum(a[3], "orders.move");
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("order.move", CharIds: ids, X: x, Y: y, Z: z));
+        return DynValue.True;
+    }
+
+    DynValue QueueStop(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 1) throw new ScriptRuntimeException("orders.stop(chars) expects character id(s)");
+        var ids = ParseCharIds(a[0], "orders.stop");
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("order.stop", CharIds: ids));
+        return DynValue.True;
+    }
+
+    DynValue QueueFollow(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 2) throw new ScriptRuntimeException("orders.follow(chars, target[, guard]) expects chars and target");
+        var ids = ParseCharIds(a[0], "orders.follow");
+        var (ts, tg) = ParseSingleChar(a[1], "orders.follow");
+        bool guard = a.Count >= 3 && a[2].CastToBool();
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("order.follow", CharIds: ids, TargetSlot: ts, TargetGen: tg, Flag: guard));
+        return DynValue.True;
+    }
+
+    DynValue QueueAttack(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 2) throw new ScriptRuntimeException("orders.attack(chars, target) expects chars and target");
+        var ids = ParseCharIds(a[0], "orders.attack");
+        var (ts, tg) = ParseSingleChar(a[1], "orders.attack");
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("order.attack", CharIds: ids, TargetSlot: ts, TargetGen: tg));
+        return DynValue.True;
+    }
+
+    DynValue QueueSquadAi(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 2 || a[0].Type != DataType.String)
+            throw new ScriptRuntimeException("orders.squad_ai(option, on) expects option name and boolean");
+        string opt = a[0].String.Trim().ToLowerInvariant();
+        if (opt.Length == 0 || opt.Length > 32) throw new ScriptRuntimeException("orders.squad_ai: invalid option");
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("order.squad_ai", Text: opt, Flag: a[1].CastToBool()));
+        return DynValue.True;
+    }
+
+    DynValue QueueFloater(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 4 || a[3].Type != DataType.String)
+            throw new ScriptRuntimeException("world.floater(x, y, z, text) expects coordinates and text");
+        double x = FiniteNum(a[0], "world.floater"), y = FiniteNum(a[1], "world.floater"), z = FiniteNum(a[2], "world.floater");
+        string text = a[3].String.Trim();
+        if (text.Length == 0) return DynValue.False;
+        if (text.Length > 80) text = text[..80];
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("world.floater", X: x, Y: y, Z: z, Text: text));
+        return DynValue.True;
+    }
+
+    // ---------------------------------------------------------------- pack.save (0.4.0 C7-safe persistence)
+
+    string? StateFilePath(string id)
+    {
+        if (string.IsNullOrEmpty(_stateDir)) return null;
+        return HostedScript.SafePath(_stateDir, id.ToLowerInvariant() + ".bin");
+    }
+
+    bool SavePackState(PackState p)
+    {
+        if (p.Box is null || p.Box.Faulted) return false;
+        string? path = StateFilePath(p.Manifest.Id);
+        if (path is null) return false;
+        try
+        {
+            byte[] data = p.Box.Save();
+            if (data.Length > MaxPackSaveBytes)
+            {
+                _log($"pack '{p.Manifest.Id}': state too large to save ({data.Length} > {MaxPackSaveBytes} bytes)");
+                return false;
+            }
+            Directory.CreateDirectory(_stateDir!);
+            File.WriteAllBytes(path, data);
+            return true;
+        }
+        catch (Exception e) { _log($"pack '{p.Manifest.Id}': save failed: {e.Message}"); return false; }
+    }
+
+    void LoadPackState(PackState p)
+    {
+        if (p.Box is null || p.Box.Faulted) return;
+        string? path = StateFilePath(p.Manifest.Id);
+        if (path is null || !File.Exists(path)) return;
+        try
+        {
+            var fi = new FileInfo(path);
+            if (fi.Length == 0 || fi.Length > MaxPackSaveBytes) return;
+            p.Box.Restore(File.ReadAllBytes(path));
+        }
+        catch (Exception e) { _log($"pack '{p.Manifest.Id}': saved state ignored: {e.Message}"); }
     }
 }

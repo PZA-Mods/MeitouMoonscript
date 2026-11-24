@@ -3,11 +3,14 @@
 // interface side, never touches the World (MeitouClient docs/modding.md "Determinism contract"). It changes nothing and holds no state the
 // world needs: not hashed, not saved. The selected ids come from the interface (PlayerInterface.SelectedIds, read each frame).
 using System.Collections.Concurrent;
+using System.Numerics;
 using Meitou.Data.Fcs;
 using Meitou.Data.Gameplay.Bodies;
 using Meitou.Simulation;
 using Meitou.Simulation.Combat;
 using Meitou.Simulation.Items;
+using Meitou.Simulation.Locks;
+using Meitou.Simulation.Player;
 using PZA.Moonscript.Repl;
 
 namespace PZA.Moonscript;
@@ -16,6 +19,8 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
 {
     public const int MaxSquad = 8;
     const int MaxQueuedEvents = 64;
+    const int MaxQueuedActions = 64;
+    const int MaxScannedChars = 512;
 
     static volatile object? s_hours;      // boxed double, null before a world runs
     static volatile object? s_cats;       // boxed long, null before a world runs
@@ -23,7 +28,9 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
     static volatile FighterSnap[] s_squad = [];
     static volatile CharacterId[] s_squadIds = [];   // the same characters as s_squad, in order (the battle window draws their faces)
     static volatile CharacterId[] s_selectedIds = [];
+    static volatile WorldScanSnapshot s_scan = WorldScanSnapshot.Empty;
     static readonly ConcurrentQueue<GameEvent> s_events = new();
+    static readonly ConcurrentQueue<WorldAction> s_actions = new();
     int _lastWholeHour = -1, _lastDay = -1;
     public static long Ticks;
 
@@ -32,6 +39,14 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
     public static string? SelectedName => s_selected;
     public static IReadOnlyList<FighterSnap> Squad => s_squad;
     public static IReadOnlyList<CharacterId> SquadIds => s_squadIds;
+    public static WorldScanSnapshot Scan => s_scan;
+
+    /// <summary>Queue a safe world action from PackHost (drained on the next SlowWorld simulation tick).</summary>
+    public static void EnqueueAction(WorldAction action)
+    {
+        if (s_actions.Count >= MaxQueuedActions) return;
+        s_actions.Enqueue(action);
+    }
 
     /// <summary>Set from the interface each frame.</summary>
     public static void SetSelection(IReadOnlyList<CharacterId> ids) => s_selectedIds = [.. ids];
@@ -53,8 +68,9 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
     /// <summary>A new world: nothing from the old one carries over.</summary>
     public WorldSnapshot()
     {
-        s_hours = null; s_cats = null; s_selected = null; s_squad = []; s_squadIds = [];
+        s_hours = null; s_cats = null; s_selected = null; s_squad = []; s_squadIds = []; s_scan = WorldScanSnapshot.Empty;
         while (s_events.TryDequeue(out _)) { }
+        while (s_actions.TryDequeue(out _)) { }
     }
 
     public void HitResolved(World world, in CombatHit hit)
@@ -167,6 +183,159 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
         s_selected = name;
         s_squad = list.Count == 0 ? [] : [.. list];
         s_squadIds = idList.Count == list.Count ? [.. idList] : [];
+
+        ApplyQueuedActions(world);
+        CaptureWorldScan(world);
+    }
+
+    static void ApplyQueuedActions(World world)
+    {
+        int processed = 0;
+        long tick = world.Tick;
+        while (processed < MaxQueuedActions && s_actions.TryDequeue(out var act))
+        {
+            processed++;
+            try
+            {
+                switch (act.Kind)
+                {
+                    case "door.toggle" when !string.IsNullOrEmpty(act.TargetId):
+                        world.Commands.Enqueue(new ToggleDoorsOrder(act.TargetId) { Tick = tick });
+                        break;
+                    case "door.set_open" when !string.IsNullOrEmpty(act.TargetId):
+                    {
+                        var doors = world.Fixtures.OfBuilding(act.TargetId);
+                        bool anyNeedsToggle = false;
+                        foreach (var f in doors)
+                        {
+                            if (f.Kind != FixtureKind.Door || f.DoorBroken) continue;
+                            bool isOpen = f.Motion is DoorMotion.Open or DoorMotion.Opening || f.OpenAmount > 0.5f;
+                            if (isOpen != act.Flag) { anyNeedsToggle = true; break; }
+                        }
+                        if (anyNeedsToggle)
+                            world.Commands.Enqueue(new ToggleDoorsOrder(act.TargetId) { Tick = tick });
+                        break;
+                    }
+                    case "door.toggle_lock" when !string.IsNullOrEmpty(act.TargetId):
+                        world.Commands.Enqueue(new ToggleDoorLocksOrder(act.TargetId) { Tick = tick });
+                        break;
+                    case "door.set_locked" when !string.IsNullOrEmpty(act.TargetId):
+                    {
+                        var doors = world.Fixtures.OfBuilding(act.TargetId);
+                        bool anyNeedsToggle = false;
+                        foreach (var f in doors)
+                        {
+                            if (f.Kind != FixtureKind.Door || f.DoorBroken) continue;
+                            bool isLocked = f.Lock?.EffectivelyLocked ?? false;
+                            if (isLocked != act.Flag) { anyNeedsToggle = true; break; }
+                        }
+                        if (anyNeedsToggle)
+                            world.Commands.Enqueue(new ToggleDoorLocksOrder(act.TargetId) { Tick = tick });
+                        break;
+                    }
+                    case "order.move" when act.CharIds is { Count: > 0 }:
+                        world.Commands.Enqueue(new MoveOrder(ToCharIds(act.CharIds), new Vector3((float)act.X, (float)act.Y, (float)act.Z)) { Tick = tick });
+                        break;
+                    case "order.stop" when act.CharIds is { Count: > 0 }:
+                        world.Commands.Enqueue(new StopCommand(ToCharIds(act.CharIds)) { Tick = tick });
+                        break;
+                    case "order.follow" when act.CharIds is { Count: > 0 }:
+                        world.Commands.Enqueue(new FollowOrder(ToCharIds(act.CharIds), new CharacterId(act.TargetSlot, act.TargetGen)) { Tick = tick, Guard = act.Flag });
+                        break;
+                    case "order.attack" when act.CharIds is { Count: > 0 }:
+                        world.Commands.Enqueue(new AttackOrder(ToCharIds(act.CharIds), new CharacterId(act.TargetSlot, act.TargetGen)) { Tick = tick });
+                        break;
+                    case "order.squad_ai" when !string.IsNullOrEmpty(act.Text) && TryParseSquadAi(act.Text, out var opt):
+                        world.Commands.Enqueue(new SquadAiCommand(opt, act.Flag) { Tick = tick });
+                        break;
+                    case "world.floater" when !string.IsNullOrEmpty(act.Text):
+                        world.Floaters?.Enqueue(Floater.Label(new Vector3((float)act.X, (float)act.Y, (float)act.Z), act.Text));
+                        break;
+                }
+            }
+            catch (Exception) { }
+        }
+    }
+
+    static CharacterId[] ToCharIds(IReadOnlyList<(int Slot, int Gen)> raw)
+    {
+        var arr = new CharacterId[raw.Count];
+        for (int i = 0; i < raw.Count; i++) arr[i] = new CharacterId(raw[i].Slot, raw[i].Gen);
+        return arr;
+    }
+
+    static bool TryParseSquadAi(string name, out SquadAi opt)
+    {
+        opt = name.Trim().ToLowerInvariant() switch
+        {
+            "ditch" => SquadAi.Ditch,
+            "sleep" => SquadAi.Sleep,
+            "sit" => SquadAi.Sit,
+            "heal" => SquadAi.Heal,
+            "help" => SquadAi.Help,
+            "rescue" => SquadAi.Rescue,
+            "share" => SquadAi.Share,
+            "feed" => SquadAi.Feed,
+            "shoot_first" => SquadAi.ShootFirst,
+            "heal_neutrals" => SquadAi.HealNeutrals,
+            "heal_all" => SquadAi.HealAll,
+            _ => SquadAi.None,
+        };
+        return opt != SquadAi.None;
+    }
+
+    static void CaptureWorldScan(World world)
+    {
+        try
+        {
+            int playerFaction = world.Player.Exists ? world.Player.Faction : -1;
+
+            var chars = new List<CharSnap>();
+            var table = world.Characters;
+            var next = table.Next;
+            int hw = table.HighWater;
+            for (int slot = 0; slot < hw && chars.Count < MaxScannedChars; slot++)
+            {
+                ref readonly var hot = ref next[slot];
+                if (!hot.Alive || hot.Dormant) continue;
+                var cold = table.Cold(slot);
+                if (cold is null) continue;
+                var id = table.IdOf(slot);
+                bool down = cold.Medical is { } m && (m.Unconscious || m.Dead);
+                bool dead = cold.Medical?.Dead ?? false;
+                chars.Add(new CharSnap(
+                    id.Slot, id.Generation,
+                    string.IsNullOrWhiteSpace(cold.Name) ? "Drifter" : cold.Name.Trim(),
+                    cold.Faction, cold.IsPlayer,
+                    hot.Position.X, hot.Position.Y, hot.Position.Z,
+                    hot.Health, down, dead, cold.InCombat, cold.SquadId));
+            }
+
+            var doors = new List<DoorSnap>();
+            foreach (var f in world.Fixtures.All)
+            {
+                if (f.Kind != FixtureKind.Door) continue;
+                bool locked = f.Lock?.EffectivelyLocked ?? false;
+                doors.Add(new DoorSnap(
+                    f.Id, f.Building, f.Owner, playerFaction >= 0 && f.Owner == playerFaction,
+                    f.Position.X, f.Position.Y, f.Position.Z,
+                    f.OpenAmount, f.Motion.ToString().ToLowerInvariant(),
+                    locked, f.DoorBroken, f.GateCode != 0));
+            }
+
+            var blds = new List<BuildingSnap>();
+            foreach (var b in world.Buildings.All)
+            {
+                blds.Add(new BuildingSnap(
+                    b.Id, b.Name ?? b.Record ?? "", b.Record ?? "",
+                    b.Owner, playerFaction >= 0 && b.Owner == playerFaction,
+                    b.Position.X, b.Position.Y, b.Position.Z,
+                    b.Complete, b.Progress));
+            }
+
+            s_scan = new WorldScanSnapshot(chars, doors, blds);
+        }
+        catch (Exception) { }
     }
 
     static FighterSnap ReadFighter(CharacterCold cold)

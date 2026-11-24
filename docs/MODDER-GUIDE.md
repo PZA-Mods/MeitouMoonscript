@@ -48,7 +48,10 @@ MeitouMoonscript automatically discovers every `pack.json` under `<mods>/<AnyMod
   - `"commands"` — `command(name, fn)`
   - `"timers"` — `after(hours, fn)` and `every(hours, fn)`
   - `"events"` — `on(event, fn)`
-  - `"world.read"` — `world.*` and `selected.name()`
+  - `"world.read"` — `world.hour()`, `world.day()`, `world.cats()`, `world.squad()`, `selected.name()`
+  - `"world.scan"` — spatial & outpost sensors: `world.characters([x, z, radius, filter])`, `world.doors([onlyPlayer])`, `world.buildings([onlyPlayer])`
+  - `"world.control"` — rate-limited world actuators (max 16 actions/tick per pack, queued onto Meitou's simulation command queue): `doors.*`, `orders.*`, `world.floater(...)`
+  - `"pack.save"` — automatic C7-safe persistence of the pack's plain-data `state` table across restarts (`pack.save()`, max 256 KB)
 
 ### Pack Lifecycle & Security Model
 
@@ -98,6 +101,37 @@ Unknown event names are rejected with an error. Event callbacks run inside the p
 | `world.cats()` | Player faction cats (integer). |
 | `world.squad()` | Array of live squad fighter tables (`name`, `race`, `skeleton`, `hp`, `maxHp`, `bleed`, `down`, `str`, `dex`, `tough`, `atk`, `def`, `dodge`, `ma`, `med`, `robotics`, `weapon`, `weaponDmg`, `ranged`, `tier`, `armour`). |
 | `selected.name()` | Name of the currently selected character (or `nil`). |
+
+### World Sensors (`"world.scan"`)
+
+| Function | Returns |
+| :--- | :--- |
+| `world.characters([x, z, radius, filter])` | Array of active characters (`slot`, `gen`, `name`, `faction`, `is_player`, `x`, `y`, `z`, `dist`, `hp`, `down`, `dead`, `in_combat`, `squad_id`). Optional `filter`: `"player"`, `"npc"`, `"alive"`, `"combat"`. |
+| `world.doors([onlyPlayer])` | Array of door/gate fixtures (`id`, `building`, `owner`, `is_player`, `x`, `y`, `z`, `open_amount`, `motion`, `locked`, `broken`, `is_gate`). |
+| `world.buildings([onlyPlayer])` | Array of player-built structures (`id`, `name`, `record`, `owner`, `is_player`, `x`, `y`, `z`, `complete`, `progress`). |
+
+### World Actuators (`"world.control"`, max 16 actions/tick per pack)
+
+All actuators enqueue onto Meitou's deterministic `World.Commands` queue on the next simulation tick and return `true` if queued or `false` if the per-tick rate limit was reached:
+
+| Function | Effect |
+| :--- | :--- |
+| `doors.toggle(buildingId)` | Toggle open/close on a building's doors/gates. |
+| `doors.set_open(buildingId, open)` | Idempotent open/close (only toggles if not already in the desired state). |
+| `doors.toggle_lock(buildingId)` | Toggle lock state on a building's doors/gates. |
+| `doors.set_locked(buildingId, locked)` | Idempotent lock/unlock (only toggles if not already in the desired state). |
+| `orders.move(chars, x, y, z)` | Move one character table (`{slot, gen}`) or an array of them to `(x, y, z)`. |
+| `orders.stop(chars)` | Stop current movement/orders for the given character(s). |
+| `orders.follow(chars, target[, guard])` | Follow (or bodyguard when `guard == true`) `target` (`{slot, gen}`). |
+| `orders.attack(chars, target)` | Order character(s) to attack `target` (`{slot, gen}`). |
+| `orders.squad_ai(option, on)` | Toggle squad AI flag (`"heal"`, `"help"`, `"rescue"`, `"shoot_first"`, `"heal_neutrals"`, `"heal_all"`, `"ditch"`, `"sleep"`, `"sit"`, `"share"`, `"feed"`). |
+| `world.floater(x, y, z, text)` | Show a floating 3D world label at `(x, y, z)` (no console needed). |
+
+### Persistent State (`"pack.save"`)
+
+| Function | Effect |
+| :--- | :--- |
+| `pack.save()` | Immediately persists the pack's plain-data `state` table (up to 256 KB). Also auto-saved on `/stop` and auto-restored on `/start`. |
 
 ### Vetted Pure-Lua Standard Library (`lib`)
 
