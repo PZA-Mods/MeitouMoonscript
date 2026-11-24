@@ -1,0 +1,7 @@
+bin/
+obj/
+out/
+mod/local.props
+tests/out/
+*.user
+__pycache__/

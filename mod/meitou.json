@@ -1,0 +1,11 @@
+{
+  // MeitouMoonscript (author PZA, GPLv3 or later): a shared Lua host for Meitou mods, and an in-game terminal.
+  // Schema: MeitouClient docs/modding.md "Discovery", docs/modding-dependencies.md "Manifest". Only our own DLL is exported: MoonSharp
+  // (MoonSharp.Interpreter.dll, beside it in this folder) loads in this mod's context only and stays private.
+  "id": "pza.moonscript",
+  "version": "0.3.0",
+  "apiVersion": 2,
+  "assemblies": ["MeitouMoonscript.dll"],
+  "entry": "PZA.Moonscript.HostMod",
+  "gameVersion": ">=0.20.1"
+}

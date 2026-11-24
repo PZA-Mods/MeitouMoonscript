@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- MeitouMoonscript: the code mod (author PZA, GPLv3 or later). Built against MeitouClient 0.20.1 (gameVersion ">=0.20.1").
+       The game supplies every Meitou assembly and 0Harmony at run time: referenced by path with Private="false", never copied.
+       MoonSharp (BSD 3-Clause, NOTICE.md) is a NuGet reference whose DLL build.ps1 stages beside ours, checked by its sha256. -->
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <AssemblyName>MeitouMoonscript</AssemblyName>
+    <RootNamespace>PZA.Moonscript</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Version>0.3.0</Version>
+    <Authors>PZA</Authors>
+    <Company>PZA</Company>
+    <Product>MeitouMoonscript</Product>
+    <Copyright>PZA, GPLv3 or later</Copyright>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildProjectDirectory)=MeitouMoonscript/mod</PathMap>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+  </PropertyGroup>
+  <Import Project="$(MSBuildThisFileDirectory)local.props" Condition="'$(MeitouDir)' == '' And Exists('$(MSBuildThisFileDirectory)local.props')" />
+
+  <ItemGroup>
+    <Reference Include="MeitouClient"><HintPath>$(MeitouDir)\MeitouClient.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Meitou.Simulation"><HintPath>$(MeitouDir)\Meitou.Simulation.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Meitou.Core"><HintPath>$(MeitouDir)\Meitou.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Meitou.Data"><HintPath>$(MeitouDir)\Meitou.Data.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(MeitouDir)\0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <PackageReference Include="MoonSharp" Version="3.0.0-beta.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="tools\**;out\**;bin\**;obj\**" />
+    <None Remove="tools\**;out\**" />
+    <Compile Include="..\..\PZAMeitouUi\src\*.cs" Link="PzaMeitouUi\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <Target Name="CheckMeitouDir" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(MeitouDir)\MeitouClient.dll')" Text="MeitouClient.dll not found in MeitouDir='$(MeitouDir)'. Pass -p:MeitouDir=..." />
+  </Target>
+</Project>

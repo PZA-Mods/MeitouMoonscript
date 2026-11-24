@@ -1,0 +1,10 @@
+{
+  "id": "combat-ticker",
+  "name": "Combat Ticker",
+  "author": "PZA",
+  "version": "0.1.0",
+  "side": "ui",
+  "entry": "main.lua",
+  "permissions": ["commands", "events"],
+  "description": "Starter event pack: tracks hits, knockdowns, and days via on(...) and lib.fsm; type /ticker for a summary"
+}

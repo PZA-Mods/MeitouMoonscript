@@ -1,0 +1,10 @@
+{
+  "id": "wasteland-dice",
+  "name": "Wasteland Dice",
+  "author": "PZA",
+  "version": "0.1.0",
+  "side": "ui",
+  "entry": "main.lua",
+  "permissions": ["commands", "world.read"],
+  "description": "Starter Lua pack: adds /roll [NdS] using the seeded RNG and lib.fsm"
+}
