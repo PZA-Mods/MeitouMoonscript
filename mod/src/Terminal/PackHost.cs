@@ -34,7 +34,7 @@ public sealed class PackHost
 
     public static readonly HashSet<string> SafePermissions = new(StringComparer.OrdinalIgnoreCase)
     {
-        "commands", "timers", "events", "world.read", "world.scan", "world.control", "pack.save", "camera.read", "ui.hud",
+        "commands", "timers", "events", "world.read", "world.scan", "world.control", "world.items", "pack.save", "camera.read", "ui.hud",
     };
 
     readonly Dictionary<string, (string Owner, IReadOnlyList<HostFunction> Functions)> _extensions = new(StringComparer.OrdinalIgnoreCase);
@@ -110,6 +110,7 @@ public sealed class PackHost
         public List<string> Commands { get; } = [];
         public List<TimerEntry> Timers { get; } = [];
         public Dictionary<string, List<DynValue>> Events { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, DynValue> HudCallbacks { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     public PackHost(string packsDir, Func<double?> hours, Func<string?> selected, Func<IReadOnlyList<FighterSnap>> squad,
@@ -335,12 +336,22 @@ public sealed class PackHost
             box.Expose("camera", "yaw", _ => _camera?.Invoke() is { } c ? DynValue.NewNumber(c.Yaw) : DynValue.Nil);
             box.Expose("camera", "pitch", _ => _camera?.Invoke() is { } c ? DynValue.NewNumber(c.Pitch) : DynValue.Nil);
             box.Expose("camera", "fov", _ => _camera?.Invoke() is { } c ? DynValue.NewNumber(c.FovY) : DynValue.Nil);
+            box.Expose("camera", "project", a => CameraProject(box.RawScript, a));
+        }
+        if (granted.Contains("world.items"))
+        {
+            box.Expose("items", "list", a => ListItems(box.RawScript, a));
+            box.Expose("items", "give", a => QueueItemGive(p, a));
+            box.Expose("items", "remove", a => QueueItemRemove(p, a));
+            box.Expose("world", "add_cats", a => QueueAddCats(p, a));
         }
         if (granted.Contains("ui.hud"))
         {
             box.Expose("hud", "set_text", a => HudSetText(p, a));
+            box.Expose("hud", "set_bar", a => HudSetBar(p, a));
+            box.Expose("hud", "set_button", a => HudSetButton(p, a));
             box.Expose("hud", "remove", a => HudRemove(p, a));
-            box.Expose("hud", "clear", _ => { _hud?.ClearPack(p.Manifest.Id); return DynValue.True; });
+            box.Expose("hud", "clear", _ => { p.HudCallbacks.Clear(); _hud?.ClearPack(p.Manifest.Id); return DynValue.True; });
         }
         foreach (var cap in granted)
         {
@@ -363,6 +374,7 @@ public sealed class PackHost
         p.Commands.Clear();
         p.Timers.Clear();
         p.Events.Clear();
+        p.HudCallbacks.Clear();
         box.Load(p.Manifest.Entry, text);
         if (box.Faulted || box.LastError is not null)
         {
@@ -386,6 +398,7 @@ public sealed class PackHost
         p.Commands.Clear();
         p.Timers.Clear();
         p.Events.Clear();
+        p.HudCallbacks.Clear();
         p.Box = null;
         p.Running = false;
         p.CanSave = false;
@@ -832,6 +845,44 @@ public sealed class PackHost
         return DynValue.NewTable(t);
     }
 
+    DynValue CameraProject(Script s, CallbackArguments a)
+    {
+        if (_camera?.Invoke() is not { } c) return DynValue.Nil;
+        if (a.Count < 3) throw new ScriptRuntimeException("camera.project(x, y, z) expects 3 numbers");
+        double wx = FiniteNum(a[0], "camera.project"), wy = FiniteNum(a[1], "camera.project"), wz = FiniteNum(a[2], "camera.project");
+        double dx = wx - c.X, dy = wy - c.Y, dz = wz - c.Z;
+        double fx = c.FwdX, fy = c.FwdY, fz = c.FwdZ;
+        // right = normalize(cross(fwd, worldUp(0,1,0))) = (-fz, 0, fx)
+        double rx = -fz, ry = 0, rz = fx;
+        double rlen = Math.Sqrt(rx * rx + rz * rz);
+        if (rlen > 1e-6) { rx /= rlen; rz /= rlen; } else { rx = 1; rz = 0; }
+        // up = cross(right, fwd)
+        double ux = ry * fz - rz * fy;
+        double uy = rz * fx - rx * fz;
+        double uz = rx * fy - ry * fx;
+
+        double depth = dx * fx + dy * fy + dz * fz;
+        var t = new Table(s);
+        if (depth <= 0.1)
+        {
+            t["x"] = -1; t["y"] = -1; t["visible"] = false; t["dist"] = depth;
+            return DynValue.NewTable(t);
+        }
+        double cx = dx * rx + dy * ry + dz * rz;
+        double cy = dx * ux + dy * uy + dz * uz;
+        double fovRad = c.FovY > 3.5 ? c.FovY * Math.PI / 180.0 : c.FovY;
+        if (!double.IsFinite(fovRad) || fovRad <= 0.05) fovRad = Math.PI / 3.0;
+        double tanHalfY = Math.Tan(fovRad * 0.5);
+        double aspect = double.IsFinite(c.Aspect) && c.Aspect > 0.1 ? c.Aspect : (16.0 / 9.0);
+        double ndcX = cx / (depth * tanHalfY * aspect);
+        double ndcY = cy / (depth * tanHalfY);
+        double sx = 0.5 + 0.5 * ndcX;
+        double sy = 0.5 - 0.5 * ndcY;
+        t["x"] = sx; t["y"] = sy; t["dist"] = depth;
+        t["visible"] = sx >= 0.0 && sx <= 1.0 && sy >= 0.0 && sy <= 1.0;
+        return DynValue.NewTable(t);
+    }
+
     DynValue HudSetText(PackState p, CallbackArguments a)
     {
         if (_hud is null) return DynValue.False;
@@ -848,6 +899,121 @@ public sealed class PackHost
     DynValue HudRemove(PackState p, CallbackArguments a)
     {
         if (_hud is null || a.Count < 1 || a[0].Type != DataType.String) return DynValue.False;
-        return DynValue.NewBoolean(_hud.Remove(p.Manifest.Id, a[0].String.Trim()));
+        string id = a[0].String.Trim();
+        p.HudCallbacks.Remove(id);
+        return DynValue.NewBoolean(_hud.Remove(p.Manifest.Id, id));
+    }
+
+    DynValue HudSetBar(PackState p, CallbackArguments a)
+    {
+        if (_hud is null) return DynValue.False;
+        if (a.Count < 7) throw new ScriptRuntimeException("hud.set_bar(id, x, y, w, h, value, max[, label, color]) expects at least 7 arguments");
+        if (a[0].Type != DataType.String) throw new ScriptRuntimeException("hud.set_bar: id must be a string");
+        string id = a[0].String.Trim();
+        double x = FiniteNum(a[1], "hud.set_bar"), y = FiniteNum(a[2], "hud.set_bar");
+        double w = FiniteNum(a[3], "hud.set_bar"), h = FiniteNum(a[4], "hud.set_bar");
+        double val = FiniteNum(a[5], "hud.set_bar"), max = Math.Max(0.0001, FiniteNum(a[6], "hud.set_bar"));
+        string label = a.Count >= 8 && a[7].Type == DataType.String ? a[7].String.Trim() : "";
+        string color = a.Count >= 9 && a[8].Type == DataType.String ? a[8].String.Trim() : "#5FD7AF";
+        double pct = Math.Clamp(val / max, 0, 1);
+        int filled = (int)Math.Round(pct * 10);
+        string bar = "[" + new string('#', filled) + new string('-', 10 - filled) + "]";
+        string text = label.Length > 0 ? $"{label} {bar} {Math.Round(val)}/{Math.Round(max)}" : $"{bar} {Math.Round(val)}/{Math.Round(max)}";
+        p.HudCallbacks.Remove(id);
+        return DynValue.NewBoolean(_hud.SetText(p.Manifest.Id, id, x, y, w, h, text, color));
+    }
+
+    DynValue HudSetButton(PackState p, CallbackArguments a)
+    {
+        if (_hud is null) return DynValue.False;
+        if (a.Count < 7 || a[0].Type != DataType.String || a[5].Type != DataType.String || a[6].Type != DataType.Function)
+            throw new ScriptRuntimeException("hud.set_button(id, x, y, w, h, label, on_click[, color]) expects id, 4 numbers, label, and function");
+        string id = a[0].String.Trim();
+        double x = FiniteNum(a[1], "hud.set_button"), y = FiniteNum(a[2], "hud.set_button");
+        double w = FiniteNum(a[3], "hud.set_button"), h = FiniteNum(a[4], "hud.set_button");
+        string label = a[5].String;
+        string color = a.Count >= 8 && a[7].Type == DataType.String ? a[7].String.Trim() : "#F0E6D2";
+        bool ok = _hud.SetButton(p.Manifest.Id, id, x, y, w, h, label, color);
+        if (ok) p.HudCallbacks[id] = a[6];
+        return DynValue.NewBoolean(ok);
+    }
+
+    /// <summary>Invoke a pack's HUD button callback inside its sandboxed LuaBox.</summary>
+    public void DispatchHudClick(string packId, string buttonId)
+    {
+        if (!_packs.TryGetValue(packId, out var p) || !p.Running || p.Box is null) return;
+        if (!p.HudCallbacks.TryGetValue(buttonId, out var fn)) return;
+        p.ActionsThisTick = 0;
+        p.Box.RawScript.Globals["__hud_fn"] = fn;
+        p.Box.Eval("__hud_fn()");
+        if (p.Box.Faulted)
+        {
+            _log($"pack '{p.Manifest.Id}' hud button '{buttonId}' faulted: {p.Box.Fault}: {p.Box.FaultDetail}");
+            Stop(p.Manifest.Id);
+        }
+        else if (p.SaveRequested && p.CanSave)
+        {
+            p.SaveRequested = false;
+            SavePackState(p);
+        }
+    }
+
+    // ---------------------------------------------------------------- world.items (0.6.0 inventory & cats)
+
+    DynValue ListItems(Script s, CallbackArguments a)
+    {
+        if (a.Count < 1) throw new ScriptRuntimeException("items.list(char) expects a character table {slot, gen}");
+        var (slot, gen) = ParseSingleChar(a[0], "items.list");
+        var snap = _scan?.Invoke() ?? WorldScanSnapshot.Empty;
+        var arr = new Table(s);
+        if (snap.Inventories is not null && snap.Inventories.TryGetValue((slot, gen), out var list))
+        {
+            int idx = 0;
+            foreach (var it in list)
+            {
+                var t = new Table(s);
+                t["record"] = it.Record; t["name"] = it.Name; t["type"] = it.Type;
+                t["section"] = it.Section; t["qty"] = it.Qty; t["level"] = it.Level;
+                arr[++idx] = t;
+            }
+        }
+        return DynValue.NewTable(arr);
+    }
+
+    DynValue QueueItemGive(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 2 || a[1].Type != DataType.String)
+            throw new ScriptRuntimeException("items.give(char, recordId[, count, level]) expects character table and recordId");
+        var (slot, gen) = ParseSingleChar(a[0], "items.give");
+        string rec = a[1].String.Trim();
+        if (rec.Length == 0 || rec.Length > 128) throw new ScriptRuntimeException("items.give: invalid recordId");
+        int count = a.Count >= 3 && a[2].Type == DataType.Number ? (int)Math.Clamp(a[2].Number, 1, 20) : 1;
+        int level = a.Count >= 4 && a[3].Type == DataType.Number ? (int)Math.Clamp(a[3].Number, 0, 100) : 0;
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("item.give", TargetId: rec, TargetSlot: slot, TargetGen: gen, Amount: count, Level: level));
+        return DynValue.True;
+    }
+
+    DynValue QueueItemRemove(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 2 || a[1].Type != DataType.String)
+            throw new ScriptRuntimeException("items.remove(char, recordOrName[, count]) expects character table and item id/name");
+        var (slot, gen) = ParseSingleChar(a[0], "items.remove");
+        string rec = a[1].String.Trim();
+        if (rec.Length == 0 || rec.Length > 128) throw new ScriptRuntimeException("items.remove: invalid item id/name");
+        int count = a.Count >= 3 && a[2].Type == DataType.Number ? (int)Math.Clamp(a[2].Number, 1, 50) : 1;
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("item.remove", TargetId: rec, TargetSlot: slot, TargetGen: gen, Amount: count));
+        return DynValue.True;
+    }
+
+    DynValue QueueAddCats(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 1) throw new ScriptRuntimeException("world.add_cats(delta) expects a finite number");
+        int delta = (int)Math.Clamp(Math.Round(FiniteNum(a[0], "world.add_cats")), -100_000, 100_000);
+        if (delta == 0) return DynValue.True;
+        if (!TrySpendAction(p)) return DynValue.False;
+        _enqueueAction!(new WorldAction("world.add_cats", Amount: delta));
+        return DynValue.True;
     }
 }

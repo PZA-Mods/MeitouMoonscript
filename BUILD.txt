@@ -1,4 +1,4 @@
-MeitouMoonscript 0.5.0 source (GPLv3 or later), by PZA. Each folder is one repository at the commit named in SOURCE.txt.
+MeitouMoonscript 0.6.0 source (GPLv3 or later), by PZA. Each folder is one repository at the commit named in SOURCE.txt.
 Build: install the .NET SDK, unpack a Meitou release, then in PowerShell:
   .\MeitouMoonSharp\mod\build.ps1 -MeitouDir <the unpacked Meitou folder>
 It stages mod\out\MeitouMoonscript\. (-Check needs the developer's offline checker, not part of this source.)

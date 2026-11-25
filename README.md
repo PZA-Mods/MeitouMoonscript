@@ -2,7 +2,7 @@
 
 ![MeitouMoonscript](docs/media/cover.jpg)
 
-> **Version 0.5.0** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
+> **Version 0.6.0** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
 
 | Hotkey / Command | What |
 |---|---|
@@ -39,6 +39,7 @@ See **[docs/MODDER-GUIDE.md](docs/MODDER-GUIDE.md)** for the full pack & API gui
 - **Opt-in permissions (`/allow`, `/revoke`)**: Third-party packs stay stopped until approved with `/allow <pack> all` (persisted in `packs.grants.json`). `PackHost` enforces least-privilege API exposure—only the capabilities declared and approved (`commands`, `timers`, `events`, `world.read`, `world.scan`, `world.control`, `pack.save`) are exposed to that pack.
 - **World sensors, actuators & persistence (`0.4.0`)**: Opt-in `world.scan` (`world.characters`, `world.doors`, `world.buildings`), rate-limited `world.control` (max 16 actions/tick queued onto `World.Commands`: `doors.*`, `orders.*`, `world.floater`), and `pack.save` (C7-safe state persistence) enable pure-Lua base automation, raid alarms, and custom squad logic.
 - **Camera, declarative HUD & C# extensions (`0.5.0`)**: Opt-in `camera.read` (`camera.yaw`, `camera.pitch`, `camera.pos`, `camera.forward`), click-through `ui.hud` overlays (auto-hide with `F7`, auto-cleanup on `/stop`), starter `/compass` pack, and `IPackExtensionHost.RegisterPackCapability(...)` so other C# Meitou mods can expose new opt-in Lua capabilities.
+- **Inventory, interactive HUD & 3D screen projection (`0.6.0`)**: Opt-in `world.items` (`items.list`, rate-limited `items.give`/`items.remove`, `world.add_cats`), interactive HUD controls (`hud.set_bar`, clickable `hud.set_button`), `camera.project(x, y, z)` (3D world to 2D screen fractions), and rich `on("hit")` damage + 3D coordinates—enabling pure-Lua 3D nameplates, floating damage numbers, and economy/shop packs.
 
 ## Possibilities (What Modders Can Build)
 

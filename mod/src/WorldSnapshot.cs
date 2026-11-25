@@ -85,12 +85,28 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
             string aname = ac?.Name?.Trim() is { Length: > 0 } a ? a : "Unknown";
             string vname = vc?.Name?.Trim() is { Length: > 0 } v ? v : "Unknown";
             bool ranged = hit.Source == CombatHitSource.Projectile;
+            double cut = Math.Max(0, hit.Damage.Cut), blunt = Math.Max(0, hit.Damage.Blunt), pierce = Math.Max(0, hit.Damage.Pierce);
+            double totalDmg = cut + blunt + pierce;
+            var pos = hit.VictimPosition;
+            bool ko = vc?.Medical?.Unconscious ?? false;
+            bool death = vc?.Medical?.Dead ?? false;
             EnqueueEvent("hit", new Dictionary<string, object?>
             {
                 ["attacker"] = aname,
+                ["target"] = vname,
                 ["victim"] = vname,
                 ["attacker_player"] = ac?.IsPlayer ?? false,
                 ["victim_player"] = vc?.IsPlayer ?? false,
+                ["damage"] = totalDmg,
+                ["cut"] = cut,
+                ["blunt"] = blunt,
+                ["pierce"] = pierce,
+                ["part"] = hit.Part,
+                ["x"] = (double)pos.X,
+                ["y"] = (double)pos.Y,
+                ["z"] = (double)pos.Z,
+                ["ko"] = ko,
+                ["death"] = death,
                 ["ranged"] = ranged,
             });
             if (vc?.Medical is { } m && (m.Unconscious || m.Dead))
@@ -202,7 +218,8 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                 if (len > 1e-5f) fwd /= len;
                 double yaw = (Math.Atan2(fwd.X, fwd.Z) * 180.0 / Math.PI + 360.0) % 360.0;
                 double pitch = Math.Asin(Math.Clamp((double)fwd.Y, -1.0, 1.0)) * 180.0 / Math.PI;
-                s_camera = new CameraSnap(v.Eye.X, v.Eye.Y, v.Eye.Z, fwd.X, fwd.Y, fwd.Z, yaw, pitch, v.FovY);
+                double aspect = float.IsFinite(v.Aspect) && v.Aspect > 0.1f ? v.Aspect : (16.0 / 9.0);
+                s_camera = new CameraSnap(v.Eye.X, v.Eye.Y, v.Eye.Z, fwd.X, fwd.Y, fwd.Z, yaw, pitch, v.FovY, aspect);
             }
         }
         catch (Exception) { }
@@ -271,6 +288,51 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                     case "world.floater" when !string.IsNullOrEmpty(act.Text):
                         world.Floaters?.Enqueue(Floater.Label(new Vector3((float)act.X, (float)act.Y, (float)act.Z), act.Text));
                         break;
+                    case "world.add_cats" when world.Player.Exists:
+                    {
+                        long delta = Math.Clamp(act.Amount, -100_000, 100_000);
+                        world.Player.Money = Math.Max(0, world.Player.Money + delta);
+                        break;
+                    }
+                    case "item.give" when !string.IsNullOrEmpty(act.TargetId):
+                    {
+                        var cid = new CharacterId(act.TargetSlot, act.TargetGen);
+                        if (world.Characters.TryResolveNext(cid, out int slot)
+                            && world.Characters.Cold(slot)?.Inventory is { } inv
+                            && world.Fixtures.Items is { } factory)
+                        {
+                            int count = Math.Clamp(act.Amount <= 0 ? 1 : act.Amount, 1, 20);
+                            int lvl = Math.Clamp(act.Level, 0, 100);
+                            for (int i = 0; i < count; i++)
+                            {
+                                var item = factory.Create(act.TargetId, lvl, 1f);
+                                if (item is null || !inv.Add(item, true)) break;
+                            }
+                        }
+                        break;
+                    }
+                    case "item.remove" when !string.IsNullOrEmpty(act.TargetId):
+                    {
+                        var cid = new CharacterId(act.TargetSlot, act.TargetGen);
+                        if (world.Characters.TryResolveNext(cid, out int slot)
+                            && world.Characters.Cold(slot)?.Inventory is { } inv)
+                        {
+                            int left = Math.Clamp(act.Amount <= 0 ? 1 : act.Amount, 1, 50);
+                            while (left > 0)
+                            {
+                                ItemInstance? match = null;
+                                foreach (var it in inv.Items)
+                                {
+                                    if (string.Equals(it.Record, act.TargetId, StringComparison.OrdinalIgnoreCase)
+                                        || string.Equals(it.Name, act.TargetId, StringComparison.OrdinalIgnoreCase))
+                                    { match = it; break; }
+                                }
+                                if (match is null || !inv.RemoveOne(match)) break;
+                                left--;
+                            }
+                        }
+                        break;
+                    }
                 }
             }
             catch (Exception) { }
@@ -311,6 +373,7 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
             int playerFaction = world.Player.Exists ? world.Player.Faction : -1;
 
             var chars = new List<CharSnap>();
+            var invs = new Dictionary<(int Slot, int Gen), IReadOnlyList<ItemSnap>>();
             var table = world.Characters;
             var next = table.Next;
             int hw = table.HighWater;
@@ -329,6 +392,17 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                     cold.Faction, cold.IsPlayer,
                     hot.Position.X, hot.Position.Y, hot.Position.Z,
                     hot.Health, down, dead, cold.InCombat, cold.SquadId));
+                if (cold.IsPlayer && cold.Inventory is { } inv && inv.Items.Count > 0)
+                {
+                    int n = Math.Min(inv.Items.Count, 32);
+                    var list = new List<ItemSnap>(n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        var it = inv.Items[i];
+                        list.Add(new ItemSnap(it.Record ?? "", it.Name ?? "", it.Type.ToString(), it.Section ?? "", it.Quantity, it.Level));
+                    }
+                    invs[(id.Slot, id.Generation)] = list;
+                }
             }
 
             var doors = new List<DoorSnap>();
@@ -353,7 +427,7 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                     b.Complete, b.Progress));
             }
 
-            s_scan = new WorldScanSnapshot(chars, doors, blds);
+            s_scan = new WorldScanSnapshot(chars, doors, blds, invs);
         }
         catch (Exception) { }
     }

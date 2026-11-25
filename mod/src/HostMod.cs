@@ -74,6 +74,7 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
             () => WorldSnapshot.Scan, WorldSnapshot.EnqueueAction, Path.Combine(context.Folder, "pack_states"),
             () => WorldSnapshot.Camera, HudWindow.State);
         s_packs = packs;
+        HudWindow.OnButtonClick = packs.DispatchHudClick;
         lock (s_pendingExtensions)
         {
             foreach (var (owner, cap, fns) in s_pendingExtensions) packs.RegisterExtension(owner, cap, fns);

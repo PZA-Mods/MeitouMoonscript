@@ -53,7 +53,8 @@ MeitouMoonscript automatically discovers every `pack.json` under `<mods>/<AnyMod
   - `"world.control"` — rate-limited world actuators (max 16 actions/tick per pack, queued onto Meitou's simulation command queue): `doors.*`, `orders.*`, `world.floater(...)`
   - `"pack.save"` — automatic C7-safe persistence of the pack's plain-data `state` table across restarts (`pack.save()`, max 256 KB)
   - `"camera.read"` — camera heading & position: `camera.pos()`, `camera.forward()`, `camera.yaw()`, `camera.pitch()`, `camera.fov()`
-  - `"ui.hud"` — declarative, non-blocking HUD text overlays (`hud.set_text`, `hud.remove`, `hud.clear`, auto-hides with F7 and cleans up on `/stop`)
+  - `"ui.hud"` — declarative HUD text labels, progress bars, and clickable buttons (`hud.set_text`, `hud.set_bar`, `hud.set_button`, `hud.remove`, `hud.clear`, auto-hides with F7 and cleans up on `/stop`)
+  - `"world.items"` — player inventory & cats: `items.list(char)`, rate-limited `items.give(char, recordId[, count, level])`, `items.remove(char, recordOrName[, count])`, `world.add_cats(delta)`
   - **Custom C# extension capabilities** — registered by other C# Meitou mods via `IPackExtensionHost.RegisterPackCapability(...)`
 
 ### Pack Lifecycle & Security Model
@@ -142,8 +143,20 @@ All actuators enqueue onto Meitou's deterministic `World.Commands` queue on the 
 | :--- | :--- |
 | `camera.pos()` / `camera.forward()` | Returns `{ x, y, z }` world-space camera position or unit forward vector (or `nil` before a world loads). |
 | `camera.yaw()` / `camera.pitch()` / `camera.fov()` | Returns heading in degrees (`0..360`), pitch in degrees, or vertical FOV. |
+| `camera.project(x, y, z)` | Projects a 3D world point to 2D screen fractions `{ x, y, visible, dist }` ready for `hud.set_text` / `hud.set_bar` (for 3D nameplates & floating damage numbers). |
 | `hud.set_text(id, x, y, w, h, text[, color])` | Draws/updates a click-through HUD text label at screen fractions `0..1` (max 16 per pack; `color` like `"#F0E6D2"`). |
+| `hud.set_bar(id, x, y, w, h, val, max[, label, color])` | Draws/updates a filled-block meter bar (`label [########--] 80/100`) at screen fractions `0..1`. |
+| `hud.set_button(id, x, y, w, h, label, on_click[, color])` | Draws/updates a clickable HUD button (max 8 active buttons total) that invokes `on_click()` inside the pack's sandbox. |
 | `hud.remove(id)` / `hud.clear()` | Removes one or all HUD elements owned by this pack (also cleared automatically when the pack stops). |
+
+### Inventory & Cats (`"world.items"`, rate-limited)
+
+| Function | Effect |
+| :--- | :--- |
+| `items.list(char)` | Returns array of inventory items for player character `{ slot, gen }`: `{ record, name, type, section, qty, level }`. |
+| `items.give(char, recordId[, count, level])` | Queues creating up to 20 items (`ItemFactory.Create`) into `char`'s inventory on the next `SlowWorld` tick. |
+| `items.remove(char, recordOrName[, count])` | Queues removing up to 50 matching items from `char`'s inventory on the next `SlowWorld` tick. |
+| `world.add_cats(delta)` | Queues adding/subtracting cats (clamped to `±100,000` per call, never below 0). |
 
 ### Extending Lua Packs from C# (`IPackExtensionHost`)
 
