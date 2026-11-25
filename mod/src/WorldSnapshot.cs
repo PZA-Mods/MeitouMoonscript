@@ -29,6 +29,7 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
     static volatile CharacterId[] s_squadIds = [];   // the same characters as s_squad, in order (the battle window draws their faces)
     static volatile CharacterId[] s_selectedIds = [];
     static volatile WorldScanSnapshot s_scan = WorldScanSnapshot.Empty;
+    static volatile CameraSnap? s_camera;
     static readonly ConcurrentQueue<GameEvent> s_events = new();
     static readonly ConcurrentQueue<WorldAction> s_actions = new();
     int _lastWholeHour = -1, _lastDay = -1;
@@ -40,6 +41,7 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
     public static IReadOnlyList<FighterSnap> Squad => s_squad;
     public static IReadOnlyList<CharacterId> SquadIds => s_squadIds;
     public static WorldScanSnapshot Scan => s_scan;
+    public static CameraSnap? Camera => s_camera;
 
     /// <summary>Queue a safe world action from PackHost (drained on the next SlowWorld simulation tick).</summary>
     public static void EnqueueAction(WorldAction action)
@@ -68,7 +70,7 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
     /// <summary>A new world: nothing from the old one carries over.</summary>
     public WorldSnapshot()
     {
-        s_hours = null; s_cats = null; s_selected = null; s_squad = []; s_squadIds = []; s_scan = WorldScanSnapshot.Empty;
+        s_hours = null; s_cats = null; s_selected = null; s_squad = []; s_squadIds = []; s_scan = WorldScanSnapshot.Empty; s_camera = null;
         while (s_events.TryDequeue(out _)) { }
         while (s_actions.TryDequeue(out _)) { }
     }
@@ -186,6 +188,24 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
 
         ApplyQueuedActions(world);
         CaptureWorldScan(world);
+        CaptureCamera(world);
+    }
+
+    static void CaptureCamera(World world)
+    {
+        try
+        {
+            if (world.View is { } v)
+            {
+                var fwd = v.Forward;
+                float len = fwd.Length();
+                if (len > 1e-5f) fwd /= len;
+                double yaw = (Math.Atan2(fwd.X, fwd.Z) * 180.0 / Math.PI + 360.0) % 360.0;
+                double pitch = Math.Asin(Math.Clamp((double)fwd.Y, -1.0, 1.0)) * 180.0 / Math.PI;
+                s_camera = new CameraSnap(v.Eye.X, v.Eye.Y, v.Eye.Z, fwd.X, fwd.Y, fwd.Z, yaw, pitch, v.FovY);
+            }
+        }
+        catch (Exception) { }
     }
 
     static void ApplyQueuedActions(World world)

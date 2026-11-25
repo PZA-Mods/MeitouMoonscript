@@ -1,0 +1,10 @@
+{
+  "id": "compass",
+  "name": "Simple Compass",
+  "author": "PZA",
+  "version": "0.1.0",
+  "side": "ui",
+  "entry": "main.lua",
+  "permissions": ["commands", "timers", "camera.read", "ui.hud"],
+  "description": "Starter HUD pack: toggle a top-center heading compass with /compass (uses camera.read + ui.hud)"
+}

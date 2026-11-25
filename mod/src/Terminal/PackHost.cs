@@ -34,8 +34,24 @@ public sealed class PackHost
 
     public static readonly HashSet<string> SafePermissions = new(StringComparer.OrdinalIgnoreCase)
     {
-        "commands", "timers", "events", "world.read", "world.scan", "world.control", "pack.save",
+        "commands", "timers", "events", "world.read", "world.scan", "world.control", "pack.save", "camera.read", "ui.hud",
     };
+
+    readonly Dictionary<string, (string Owner, IReadOnlyList<HostFunction> Functions)> _extensions = new(StringComparer.OrdinalIgnoreCase);
+
+    bool IsKnownPermission(string cap) => SafePermissions.Contains(cap) || _extensions.ContainsKey(cap);
+
+    /// <summary>Register a C# extension capability (e.g. from another Meitou mod). Packs must declare it in pack.json and be approved via /allow.</summary>
+    public bool RegisterExtension(string owner, string capability, IReadOnlyList<HostFunction> functions)
+    {
+        capability = (capability ?? "").Trim().ToLowerInvariant();
+        if (capability.Length == 0 || capability.Length > 48 || SafePermissions.Contains(capability)) return false;
+        if (capability.Any(c => !(char.IsLetterOrDigit(c) || c is '.' or '-' or '_'))) return false;
+        if (functions is null || functions.Count == 0) return false;
+        _extensions[capability] = (owner ?? "ext", [.. functions]);
+        _log($"pack extension registered: '{capability}' by {owner} ({functions.Count} function(s))");
+        return true;
+    }
 
     static readonly HashSet<string> ReservedCommands = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -58,6 +74,8 @@ public sealed class PackHost
     readonly Func<long?> _cats;
     readonly Func<WorldScanSnapshot>? _scan;
     readonly Action<WorldAction>? _enqueueAction;
+    readonly Func<CameraSnap?>? _camera;
+    readonly HudState? _hud;
     readonly Func<ScriptLimits> _limits;
     readonly Action<string, Ink> _out;
     readonly Action<string> _log;
@@ -97,11 +115,12 @@ public sealed class PackHost
     public PackHost(string packsDir, Func<double?> hours, Func<string?> selected, Func<IReadOnlyList<FighterSnap>> squad,
                     Func<long?> cats, Func<ScriptLimits> limits, Action<string, Ink> output, Action<string> log,
                     string? modsRoot = null, string? selfModFolderName = null, string? grantsPath = null,
-                    Func<WorldScanSnapshot>? scan = null, Action<WorldAction>? enqueueAction = null, string? stateDir = null)
+                    Func<WorldScanSnapshot>? scan = null, Action<WorldAction>? enqueueAction = null, string? stateDir = null,
+                    Func<CameraSnap?>? camera = null, HudState? hud = null)
     {
         _packsDir = packsDir; _modsRoot = modsRoot; _selfModFolderName = selfModFolderName; _grantsPath = grantsPath;
         _hours = hours; _selected = selected; _squad = squad; _cats = cats;
-        _scan = scan; _enqueueAction = enqueueAction; _stateDir = stateDir;
+        _scan = scan; _enqueueAction = enqueueAction; _stateDir = stateDir; _camera = camera; _hud = hud;
         _limits = limits; _out = output; _log = log;
         LoadGrants();
         Discover();
@@ -117,7 +136,7 @@ public sealed class PackHost
             foreach (var (id, caps) in data)
             {
                 var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var c in caps ?? []) if (SafePermissions.Contains(c)) set.Add(c.ToLowerInvariant());
+                foreach (var c in caps ?? []) if (!string.IsNullOrWhiteSpace(c)) set.Add(c.Trim().ToLowerInvariant());
                 if (set.Count > 0) _grants[id] = set;
             }
         }
@@ -148,7 +167,7 @@ public sealed class PackHost
         Discover();
         if (!_packs.TryGetValue(id, out var p)) return (false, $"unknown pack '{id}' (see /packs)");
         var req = p.Manifest.EffectivePermissions;
-        var unsupported = req.Where(c => !SafePermissions.Contains(c)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var unsupported = req.Where(c => !IsKnownPermission(c)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (unsupported.Count > 0)
             return (false, $"pack '{id}' requests unsupported permission(s): {string.Join(", ", unsupported)}");
         cap = (cap ?? "all").Trim().ToLowerInvariant();
@@ -160,8 +179,8 @@ public sealed class PackHost
             SaveGrants();
             return (true, $"allowed '{id}': {string.Join(", ", set.OrderBy(x => x))}");
         }
-        if (!SafePermissions.Contains(cap))
-            return (false, $"unknown or unsupported permission '{cap}' (known: {string.Join(", ", SafePermissions.OrderBy(x => x))})");
+        if (!IsKnownPermission(cap))
+            return (false, $"unknown or unsupported permission '{cap}' (known: {string.Join(", ", SafePermissions.Concat(_extensions.Keys).OrderBy(x => x))})");
         set.Add(cap);
         SaveGrants();
         return (true, $"allowed '{cap}' for pack '{id}'");
@@ -257,7 +276,7 @@ public sealed class PackHost
         if (p.Running) return (true, $"pack '{id}' is already running");
 
         var reqPerms = p.Manifest.EffectivePermissions;
-        var unsupported = reqPerms.Where(c => !SafePermissions.Contains(c)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var unsupported = reqPerms.Where(c => !IsKnownPermission(c)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (unsupported.Count > 0)
             return (false, $"pack '{id}' requests unsupported permission(s): {string.Join(", ", unsupported)}");
         var missing = MissingPermissions(p.Manifest);
@@ -309,6 +328,34 @@ public sealed class PackHost
         }
         p.CanSave = granted.Contains("pack.save");
         if (p.CanSave) box.Expose("pack", "save", _ => { p.SaveRequested = true; return DynValue.True; });
+        if (granted.Contains("camera.read"))
+        {
+            box.Expose("camera", "pos", _ => CameraPos(box.RawScript));
+            box.Expose("camera", "forward", _ => CameraForward(box.RawScript));
+            box.Expose("camera", "yaw", _ => _camera?.Invoke() is { } c ? DynValue.NewNumber(c.Yaw) : DynValue.Nil);
+            box.Expose("camera", "pitch", _ => _camera?.Invoke() is { } c ? DynValue.NewNumber(c.Pitch) : DynValue.Nil);
+            box.Expose("camera", "fov", _ => _camera?.Invoke() is { } c ? DynValue.NewNumber(c.FovY) : DynValue.Nil);
+        }
+        if (granted.Contains("ui.hud"))
+        {
+            box.Expose("hud", "set_text", a => HudSetText(p, a));
+            box.Expose("hud", "remove", a => HudRemove(p, a));
+            box.Expose("hud", "clear", _ => { _hud?.ClearPack(p.Manifest.Id); return DynValue.True; });
+        }
+        foreach (var cap in granted)
+        {
+            if (!_extensions.TryGetValue(cap, out var ext)) continue;
+            foreach (var fn in ext.Functions)
+            {
+                var captured = fn;
+                box.Expose(captured.Table, captured.Name, a =>
+                {
+                    var args = new ScriptValue[a.Count];
+                    for (int i = 0; i < a.Count; i++) args[i] = ScriptValue.FromLua(a[i]);
+                    return captured.Call(args).ToLua(box.RawScript);
+                });
+            }
+        }
 
         p.Box = box;
         p.Error = null;
@@ -333,6 +380,7 @@ public sealed class PackHost
     {
         if (!_packs.TryGetValue(id, out var p)) return (false, $"unknown pack '{id}'");
         if (p.Running && p.CanSave && p.Box is { Faulted: false }) SavePackState(p);
+        _hud?.ClearPack(p.Manifest.Id);
         var mine = _commands.Where(kv => ReferenceEquals(kv.Value.Pack, p)).Select(kv => kv.Key).ToList();
         foreach (var k in mine) _commands.Remove(k);
         p.Commands.Clear();
@@ -764,5 +812,42 @@ public sealed class PackHost
             p.Box.Restore(File.ReadAllBytes(path));
         }
         catch (Exception e) { _log($"pack '{p.Manifest.Id}': saved state ignored: {e.Message}"); }
+    }
+
+    // ---------------------------------------------------------------- camera.read & ui.hud (0.5.0)
+
+    DynValue CameraPos(Script s)
+    {
+        if (_camera?.Invoke() is not { } c) return DynValue.Nil;
+        var t = new Table(s);
+        t["x"] = c.X; t["y"] = c.Y; t["z"] = c.Z;
+        return DynValue.NewTable(t);
+    }
+
+    DynValue CameraForward(Script s)
+    {
+        if (_camera?.Invoke() is not { } c) return DynValue.Nil;
+        var t = new Table(s);
+        t["x"] = c.FwdX; t["y"] = c.FwdY; t["z"] = c.FwdZ;
+        return DynValue.NewTable(t);
+    }
+
+    DynValue HudSetText(PackState p, CallbackArguments a)
+    {
+        if (_hud is null) return DynValue.False;
+        if (a.Count < 6 || a[0].Type != DataType.String || a[5].Type != DataType.String)
+            throw new ScriptRuntimeException("hud.set_text(id, x, y, w, h, text[, color]) expects id, 4 numbers, and text");
+        string id = a[0].String.Trim();
+        double x = FiniteNum(a[1], "hud.set_text"), y = FiniteNum(a[2], "hud.set_text");
+        double w = FiniteNum(a[3], "hud.set_text"), h = FiniteNum(a[4], "hud.set_text");
+        string text = a[5].String;
+        string color = a.Count >= 7 && a[6].Type == DataType.String ? a[6].String.Trim() : "#F0E6D2";
+        return DynValue.NewBoolean(_hud.SetText(p.Manifest.Id, id, x, y, w, h, text, color));
+    }
+
+    DynValue HudRemove(PackState p, CallbackArguments a)
+    {
+        if (_hud is null || a.Count < 1 || a[0].Type != DataType.String) return DynValue.False;
+        return DynValue.NewBoolean(_hud.Remove(p.Manifest.Id, a[0].String.Trim()));
     }
 }

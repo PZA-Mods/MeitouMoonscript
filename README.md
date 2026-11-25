@@ -2,7 +2,7 @@
 
 ![MeitouMoonscript](docs/media/cover.jpg)
 
-> **Version 0.4.1** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
+> **Version 0.5.0** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
 
 | Hotkey / Command | What |
 |---|---|
@@ -38,6 +38,17 @@ See **[docs/MODDER-GUIDE.md](docs/MODDER-GUIDE.md)** for the full pack & API gui
 - **Cross-mod discovery**: Any Meitou mod can include `moonscript/<pack-id>/pack.json` + `main.lua`.
 - **Opt-in permissions (`/allow`, `/revoke`)**: Third-party packs stay stopped until approved with `/allow <pack> all` (persisted in `packs.grants.json`). `PackHost` enforces least-privilege API exposure—only the capabilities declared and approved (`commands`, `timers`, `events`, `world.read`, `world.scan`, `world.control`, `pack.save`) are exposed to that pack.
 - **World sensors, actuators & persistence (`0.4.0`)**: Opt-in `world.scan` (`world.characters`, `world.doors`, `world.buildings`), rate-limited `world.control` (max 16 actions/tick queued onto `World.Commands`: `doors.*`, `orders.*`, `world.floater`), and `pack.save` (C7-safe state persistence) enable pure-Lua base automation, raid alarms, and custom squad logic.
+- **Camera, declarative HUD & C# extensions (`0.5.0`)**: Opt-in `camera.read` (`camera.yaw`, `camera.pitch`, `camera.pos`, `camera.forward`), click-through `ui.hud` overlays (auto-hide with `F7`, auto-cleanup on `/stop`), starter `/compass` pack, and `IPackExtensionHost.RegisterPackCapability(...)` so other C# Meitou mods can expose new opt-in Lua capabilities.
+
+## Possibilities (What Modders Can Build)
+
+With zero C# (just a `pack.json` + `main.lua`)—or paired with a C# extension mod—modders can build:
+
+- **Outpost automation & perimeter defense**: automatically close/lock gates when hostiles approach, pop 3D floating alerts over buildings, or flip squad AI flags during raids (`world.scan`, `world.control`, `lib.fsm`).
+- **Custom HUD overlays & navigation aids**: heading compasses, squad health/status strips, combat tickers, or day/clock widgets (`camera.read`, `ui.hud`, `on(...)`).
+- **Tactical squad helpers**: automated rally/retreat orders, bodyguard/follow routines, or event-driven reactions to hits and knockdowns (`orders.*`, `on("hit")`, `on("character_down")`).
+- **In-game minigames & puzzles**: dice/card tables, turn-based skirmishes, or 2D collision minigames with deterministic RNG and saved state (`lib.tween`, `lib.fsm`, `lib.bump`, `pack.save`).
+- **C#-backed Lua frameworks**: any C# Meitou mod can plug new opt-in capabilities into `PackHost` via `IPackExtensionHost` so pure-Lua packs can safely drive custom engine features.
 - **Hardened isolation**:
   - Symlinks/junctions and path escapes (`..`) are rejected by `SafePath`.
   - Reserved terminal commands cannot be shadowed; colliding pack commands are namespaced as `/<pack-id>:<cmd>`.

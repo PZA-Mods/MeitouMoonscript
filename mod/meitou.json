@@ -3,7 +3,7 @@
   // Schema: MeitouClient docs/modding.md "Discovery", docs/modding-dependencies.md "Manifest". Only our own DLL is exported: MoonSharp
   // (MoonSharp.Interpreter.dll, beside it in this folder) loads in this mod's context only and stays private.
   "id": "pza.moonscript",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "apiVersion": 2,
   "assemblies": ["MeitouMoonscript.dll"],
   "entry": "PZA.Moonscript.HostMod",

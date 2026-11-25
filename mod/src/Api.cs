@@ -25,6 +25,14 @@ public interface IScriptHost
     IScript Open(ScriptSpec spec);
 }
 
+/// <summary>Optional extension host implemented by HostMod: allows other C# Meitou mods to register new opt-in capabilities
+/// (e.g. "terrain.sculpt", "anim.play") and Lua HostFunctions into PackHost without modifying MeitouMoonscript itself.</summary>
+public interface IPackExtensionHost
+{
+    /// <summary>Register an opt-in capability and its Lua functions (third-party packs must still declare it in pack.json and be approved via /allow).</summary>
+    bool RegisterPackCapability(string owner, string capability, IReadOnlyList<HostFunction> functions);
+}
+
 public sealed class ScriptSpec
 {
     /// <summary>The calling mod's id: in every log line about the script.</summary>

@@ -52,6 +52,9 @@ MeitouMoonscript automatically discovers every `pack.json` under `<mods>/<AnyMod
   - `"world.scan"` — spatial & outpost sensors: `world.characters([x, z, radius, filter])`, `world.doors([onlyPlayer])`, `world.buildings([onlyPlayer])`
   - `"world.control"` — rate-limited world actuators (max 16 actions/tick per pack, queued onto Meitou's simulation command queue): `doors.*`, `orders.*`, `world.floater(...)`
   - `"pack.save"` — automatic C7-safe persistence of the pack's plain-data `state` table across restarts (`pack.save()`, max 256 KB)
+  - `"camera.read"` — camera heading & position: `camera.pos()`, `camera.forward()`, `camera.yaw()`, `camera.pitch()`, `camera.fov()`
+  - `"ui.hud"` — declarative, non-blocking HUD text overlays (`hud.set_text`, `hud.remove`, `hud.clear`, auto-hides with F7 and cleans up on `/stop`)
+  - **Custom C# extension capabilities** — registered by other C# Meitou mods via `IPackExtensionHost.RegisterPackCapability(...)`
 
 ### Pack Lifecycle & Security Model
 
@@ -132,6 +135,29 @@ All actuators enqueue onto Meitou's deterministic `World.Commands` queue on the 
 | Function | Effect |
 | :--- | :--- |
 | `pack.save()` | Immediately persists the pack's plain-data `state` table (up to 256 KB). Also auto-saved on `/stop` and auto-restored on `/start`. |
+
+### Camera Sensors (`"camera.read"`) & HUD Overlays (`"ui.hud"`)
+
+| Function | Effect |
+| :--- | :--- |
+| `camera.pos()` / `camera.forward()` | Returns `{ x, y, z }` world-space camera position or unit forward vector (or `nil` before a world loads). |
+| `camera.yaw()` / `camera.pitch()` / `camera.fov()` | Returns heading in degrees (`0..360`), pitch in degrees, or vertical FOV. |
+| `hud.set_text(id, x, y, w, h, text[, color])` | Draws/updates a click-through HUD text label at screen fractions `0..1` (max 16 per pack; `color` like `"#F0E6D2"`). |
+| `hud.remove(id)` / `hud.clear()` | Removes one or all HUD elements owned by this pack (also cleared automatically when the pack stops). |
+
+### Extending Lua Packs from C# (`IPackExtensionHost`)
+
+Other C# Meitou mods can register new opt-in capabilities (e.g. `"terrain.sculpt"`, `"anim.play"`) directly into `PackHost`:
+
+```csharp
+var ext = context.Dependency<PZA.Moonscript.IPackExtensionHost>("pza.moonscript");
+ext?.RegisterPackCapability("your.mod", "your.cap",
+[
+    new HostFunction("yourtable", "ping", args => ScriptValue.Of(args[0].Number * 2)),
+]);
+```
+
+Third-party Lua packs must declare `"your.cap"` in `pack.json` and be approved by the player via `/allow <pack> all`.
 
 ### Vetted Pure-Lua Standard Library (`lib`)
 

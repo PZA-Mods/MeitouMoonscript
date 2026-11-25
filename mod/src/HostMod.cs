@@ -12,11 +12,13 @@ using PZA.Moonscript.Repl;
 
 namespace PZA.Moonscript;
 
-public sealed class HostMod : IMod, IScriptHost, IModDependents
+public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDependents
 {
     public static readonly HostSettings Settings = new();
     static ModSettingsGroup? s_group;
     static Action<string>? s_log;
+    static PackHost? s_packs;
+    static readonly List<(string Owner, string Cap, IReadOnlyList<HostFunction> Fns)> s_pendingExtensions = [];
     static readonly Dictionary<string, int> s_opened = new(StringComparer.Ordinal);
 
     public int ApiVersion => 1;
@@ -62,13 +64,21 @@ public sealed class HostMod : IMod, IScriptHost, IModDependents
         CrawlersWindow.Session = new CrawlersSession(Path.Combine(context.Folder, "scripts", "crawlers.lua"), () => WorldSnapshot.SelectedName, () => WorldSnapshot.Cats, Line);
         CrawlersWindow.Setup(context.Folder);
         ReplWindow.Session!.Core.OpenCrawlers = CrawlersWindow.Open;
+        HudWindow.Setup();
         string? modsRoot = Directory.GetParent(context.Folder)?.FullName;
         string selfFolder = Path.GetFileName(context.Folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         var packs = new PackHost(Path.Combine(context.Folder, "packs"), () => WorldSnapshot.Hours, () => WorldSnapshot.SelectedName,
             () => WorldSnapshot.Squad, () => WorldSnapshot.Cats,
             () => new ScriptLimits { InstructionsPerCall = (long)(Settings.ReplBudgetK * 1000), InstructionsPerTick = long.MaxValue / 4 },
             ReplWindow.Session.Core.Out, Line, modsRoot, selfFolder, Path.Combine(context.Folder, "packs.grants.json"),
-            () => WorldSnapshot.Scan, WorldSnapshot.EnqueueAction, Path.Combine(context.Folder, "pack_states"));
+            () => WorldSnapshot.Scan, WorldSnapshot.EnqueueAction, Path.Combine(context.Folder, "pack_states"),
+            () => WorldSnapshot.Camera, HudWindow.State);
+        s_packs = packs;
+        lock (s_pendingExtensions)
+        {
+            foreach (var (owner, cap, fns) in s_pendingExtensions) packs.RegisterExtension(owner, cap, fns);
+            s_pendingExtensions.Clear();
+        }
         ReplWindow.Session.Core.Packs = packs;
         foreach (var (m, _, _, _) in packs.List())
             if (!m.ThirdParty || Settings.AutoStartThirdPartyPacks) packs.Start(m.Id);
@@ -78,6 +88,7 @@ public sealed class HostMod : IMod, IScriptHost, IModDependents
             WorldSnapshot.SetSelection(PzaUi.SelectedCharacters());
             ReplWindow.EachFrame(Settings);
             BattleWindow.EachFrame();
+            HudWindow.EachFrame();
             packs.Tick(WorldSnapshot.Hours, WorldSnapshot.DrainEvents());
         };
         PzaUi.Install(context);
@@ -109,4 +120,11 @@ public sealed class HostMod : IMod, IScriptHost, IModDependents
 
     /// <summary>A dependent's Initialize threw (docs/modding-dependencies.md "Failed initialization"): we keep nothing of theirs.</summary>
     public void DependentFailed(string modId) => Line($"dependent {modId} failed to initialize; its scripts are its own and stop with it");
+
+    public bool RegisterPackCapability(string owner, string capability, IReadOnlyList<HostFunction> functions)
+    {
+        if (s_packs is { } p) return p.RegisterExtension(owner, capability, functions);
+        lock (s_pendingExtensions) s_pendingExtensions.Add((owner, capability, functions));
+        return true;
+    }
 }
