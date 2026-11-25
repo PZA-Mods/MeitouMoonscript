@@ -384,14 +384,40 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                 var cold = table.Cold(slot);
                 if (cold is null) continue;
                 var id = table.IdOf(slot);
-                bool down = cold.Medical is { } m && (m.Unconscious || m.Dead);
+                bool uncon = cold.Medical?.Unconscious ?? false;
                 bool dead = cold.Medical?.Dead ?? false;
+                bool down = uncon || dead;
+                List<BodyPartSnap>? parts = null;
+                double blood = 100;
+                if (cold.Medical is { } m)
+                {
+                    blood = Math.Clamp(100.0 - Math.Max(0, m.Bleeding) * 20.0, 0, 100);
+                    if (m.Parts.Count > 0)
+                    {
+                        int pn = Math.Min(m.Parts.Count, 12);
+                        parts = new List<BodyPartSnap>(pn);
+                        for (int pi = 0; pi < pn; pi++)
+                        {
+                            var pt = m.Parts[pi];
+                            string pName = pt.Template?.StringId ?? $"part{pi}";
+                            bool fatal = pi < 3
+                                || pName.Contains("head", StringComparison.OrdinalIgnoreCase)
+                                || pName.Contains("chest", StringComparison.OrdinalIgnoreCase)
+                                || pName.Contains("stomach", StringComparison.OrdinalIgnoreCase);
+                            parts.Add(new BodyPartSnap(pName, pt.Flesh, pt.Stun, Math.Max(1, pt.MaxHp), fatal));
+                        }
+                    }
+                }
+                double tough = cold.Stats is { } st ? CleanStat(st[StatsEnumerated.Toughness]) : 1;
+                bool isAlly = cold.IsPlayer || (playerFaction >= 0 && cold.Faction == playerFaction);
+                bool isEnemy = !isAlly && cold.InCombat;
                 chars.Add(new CharSnap(
                     id.Slot, id.Generation,
                     string.IsNullOrWhiteSpace(cold.Name) ? "Drifter" : cold.Name.Trim(),
                     cold.Faction, cold.IsPlayer,
                     hot.Position.X, hot.Position.Y, hot.Position.Z,
-                    hot.Health, down, dead, cold.InCombat, cold.SquadId));
+                    hot.Health, down, dead, cold.InCombat, cold.SquadId,
+                    parts, tough, blood, 100, uncon, isAlly ? 100 : (isEnemy ? -50 : 0), isEnemy, isAlly));
                 if (cold.IsPlayer && cold.Inventory is { } inv && inv.Items.Count > 0)
                 {
                     int n = Math.Min(inv.Items.Count, 32);

@@ -63,6 +63,8 @@ public sealed class ReplCore
     public Action? OpenCrawlers { get; set; }
     /// <summary>MTA:SA-style Lua pack host (optional; null in unit tests that don't load packs).</summary>
     public PackHost? Packs { get; set; }
+    /// <summary>1:1 KenshiLua compat host for &lt;Mod&gt;/scripts/init/*.lua (optional).</summary>
+    public PZA.Moonscript.KenshiLua.KenshiLuaHost? KenshiLua { get; set; }
 
     public ReplCore(IReplHost host, bool banner = true)
     {
@@ -237,6 +239,7 @@ public sealed class ReplCore
             case "/restart": PackOp(arg, "restart"); break;
             case "/allow": PackPermOp(arg, allow: true); break;
             case "/revoke": PackPermOp(arg, allow: false); break;
+            case "/kl": KenshiLuaOp(arg); break;
             default:
                 if (Packs is not null && Packs.TryCommand(cmd[1..], arg, out string? pErr, out long pIns))
                 {
@@ -262,6 +265,7 @@ public sealed class ReplCore
         Out("  /battle [fight]    animated FF-style turn-based battle: hungry, dust, beak", Ink.Text);
         Out("  /crawlers          clickable Cat Crawlers bar game window (scripts/crawlers.lua)", Ink.Text);
         Out("  /packs             list Lua packs; /start, /stop, /restart, /allow, /revoke <pack>", Ink.Text);
+        Out("  /kl [list|allow|start|stop|revoke]  manage KenshiLua compat mods (scripts/init/*.lua)", Ink.Text);
         if (Packs is not null)
         {
             var custom = Packs.RegisteredCommands();
@@ -307,6 +311,38 @@ public sealed class ReplCore
         var (ok, msg) = allow ? Packs.Allow(id, cap) : Packs.Revoke(id, cap);
         Out(msg, ok ? Ink.Result : Ink.Error);
         Status = ok ? (allow ? "allowed" : "revoked") : "error";
+    }
+
+    void KenshiLuaOp(string arg)
+    {
+        if (KenshiLua is null) { Out("KenshiLua compat host is not enabled here", Ink.Dim); return; }
+        var parts = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        string sub = parts.Length > 0 ? parts[0].ToLowerInvariant() : "list";
+        string target = parts.Length > 1 ? parts[1].Trim() : "";
+        if (sub == "list")
+        {
+            KenshiLua.Discover();
+            var list = KenshiLua.List();
+            if (list.Count == 0) { Out("no KenshiLua mods found (<Mod>/scripts/init/*.lua)", Ink.Dim); return; }
+            Out($"{list.Count} KenshiLua compat mod(s):", Ink.Accent);
+            foreach (var (info, approved, running, err) in list)
+            {
+                string st = running ? "running" : err is not null ? "error" : approved ? "stopped" : "needs /kl allow";
+                Out($"  {info.ModId,-22} {st,-15} ({info.InitScripts.Count} init script(s))", Ink.Text);
+            }
+            return;
+        }
+        if (target.Length == 0) { Out($"usage: /kl {sub} <mod>  (see /kl list)", Ink.Error); return; }
+        var (ok, msg) = sub switch
+        {
+            "allow" => KenshiLua.Allow(target),
+            "revoke" => KenshiLua.Revoke(target),
+            "start" => KenshiLua.Start(target),
+            "stop" => KenshiLua.Stop(target),
+            _ => (false, "usage: /kl [list|allow|start|stop|revoke] <mod>"),
+        };
+        Out(msg, ok ? Ink.Result : Ink.Error);
+        Status = ok ? sub : "error";
     }
 
     void Scripts()

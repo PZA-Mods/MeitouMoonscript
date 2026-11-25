@@ -7,19 +7,19 @@ namespace PZA.Moonscript;
 
 public sealed class HostSettings
 {
-    [Setting("Typing animation", Hint = "The terminal types its answers out a few letters at a time. Off: answers appear at once.")]
+    [Setting("Typing animation", Hint = "The console types its answers out a few letters at a time. Off: answers appear at once.")]
     public bool Typing { get; set; } = true;
 
-    [Setting("Typing speed", Hint = "Letters a frame while the terminal types (1 slow, 40 fast).", Min = 1, Max = 40, Step = 1)]
+    [Setting("Typing speed", Hint = "Letters a frame while the console types (1 slow, 40 fast).", Min = 1, Max = 40, Step = 1)]
     public double TypingSpeed { get; set; } = 6;
 
-    [Setting("Banner", Hint = "The terminal's title banner when it opens.")]
+    [Setting("Banner", Hint = "The console's title banner when it opens.")]
     public bool Banner { get; set; } = true;
 
-    [Setting("Terminal budget per call", Hint = "Thousands of Lua instructions one terminal line may run before it is stopped (1 to 2000).", Min = 1, Max = 2000, Step = 1)]
+    [Setting("Console budget per call", Hint = "Thousands of Lua instructions one console line may run before it is stopped (1 to 2000).", Min = 1, Max = 2000, Step = 1)]
     public double ReplBudgetK { get; set; } = 200;
 
-    [Setting("Window place across", Hint = "Where you left the terminal (a fraction of the screen from its first place). Drag its title to move it.", Min = -1, Max = 1, Step = 0.001)]
+    [Setting("Window place across", Hint = "Where you left the console (a fraction of the screen from its first place). Drag its title to move it.", Min = -1, Max = 1, Step = 0.001)]
     public double WindowPlaceX { get; set; }
 
     [Setting("Window place down", Hint = "As above, down.", Min = -1, Max = 1, Step = 0.001)]
@@ -33,4 +33,7 @@ public sealed class HostSettings
 
     [Setting("Auto-start third-party packs", Hint = "Automatically start Lua packs found in other mods' moonscript/ folders. Off: start them yourself with /start <pack>.")]
     public bool AutoStartThirdPartyPacks { get; set; } = false;
+
+    [Setting("Auto-start KenshiLua mods", Hint = "Automatically start KenshiLua mods enabled in data/mods.cfg. Off: start them yourself with /kl allow and /kl start.")]
+    public bool AutoStartKenshiLua { get; set; } = true;
 }

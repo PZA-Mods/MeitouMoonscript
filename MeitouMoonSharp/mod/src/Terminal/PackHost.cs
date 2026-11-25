@@ -55,7 +55,7 @@ public sealed class PackHost
 
     static readonly HashSet<string> ReservedCommands = new(StringComparer.OrdinalIgnoreCase)
     {
-        "help", "run", "reload", "scripts", "config", "reset", "clear", "battle", "crawlers", "packs", "start", "stop", "restart", "allow", "revoke",
+        "help", "run", "reload", "scripts", "config", "reset", "clear", "battle", "crawlers", "packs", "start", "stop", "restart", "allow", "revoke", "cancel", "kl",
     };
 
     public static readonly HashSet<string> AllowedEvents = new(StringComparer.OrdinalIgnoreCase)

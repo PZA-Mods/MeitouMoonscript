@@ -8,6 +8,7 @@ using Meitou.Modding;
 using Meitou.Simulation;
 using PZA.MeitouUi;
 using PZA.Moonscript.Core;
+using PZA.Moonscript.KenshiLua;
 using PZA.Moonscript.Repl;
 
 namespace PZA.Moonscript;
@@ -73,16 +74,33 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
             ReplWindow.Session.Core.Out, Line, modsRoot, selfFolder, Path.Combine(context.Folder, "packs.grants.json"),
             () => WorldSnapshot.Scan, WorldSnapshot.EnqueueAction, Path.Combine(context.Folder, "pack_states"),
             () => WorldSnapshot.Camera, HudWindow.State);
+        var klHost = new KenshiLuaHost(modsRoot, selfFolder, Path.Combine(context.Folder, "kenshilua.grants.json"),
+            () => WorldSnapshot.Hours, () => WorldSnapshot.Cats, () => WorldSnapshot.SelectedName,
+            () => WorldSnapshot.Scan, () => WorldSnapshot.Camera, WorldSnapshot.EnqueueAction, HudWindow.State,
+            () => new ScriptLimits { InstructionsPerCall = (long)(Settings.ReplBudgetK * 1000), InstructionsPerTick = long.MaxValue / 4 },
+            ReplWindow.Session.Core.Out, Line, Path.Combine(context.Folder, "pack_states"),
+            viewSize: () => (HudWindow.ViewWidth, HudWindow.ViewHeight));
         s_packs = packs;
-        HudWindow.OnButtonClick = packs.DispatchHudClick;
+        HudWindow.OnButtonClick = (owner, btnId) =>
+        {
+            packs.DispatchHudClick(owner, btnId);
+            klHost.DispatchHudClick(owner, btnId);
+        };
         lock (s_pendingExtensions)
         {
             foreach (var (owner, cap, fns) in s_pendingExtensions) packs.RegisterExtension(owner, cap, fns);
             s_pendingExtensions.Clear();
         }
         ReplWindow.Session.Core.Packs = packs;
+        ReplWindow.Session.Core.KenshiLua = klHost;
         foreach (var (m, _, _, _) in packs.List())
             if (!m.ThirdParty || Settings.AutoStartThirdPartyPacks) packs.Start(m.Id);
+        if (Settings.AutoStartKenshiLua)
+        {
+            var klStarted = klHost.StartEnabledFromModsCfg();
+            if (klStarted.Count > 0)
+                Line($"KenshiLua compat auto-started {klStarted.Count} mod(s) from mods.cfg: {string.Join(", ", klStarted)}");
+        }
         PzaUi.Log = Line;
         PzaUi.EachFrame = () =>
         {
@@ -90,7 +108,9 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
             ReplWindow.EachFrame(Settings);
             BattleWindow.EachFrame();
             HudWindow.EachFrame();
-            packs.Tick(WorldSnapshot.Hours, WorldSnapshot.DrainEvents());
+            var evs = WorldSnapshot.DrainEvents();
+            packs.Tick(WorldSnapshot.Hours, evs);
+            klHost.Tick(evs);
         };
         PzaUi.Install(context);
         foreach (var l in ReplKeys.Install(context.Harmony)) Line(l);
@@ -106,6 +126,7 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
         ReplSession.Switch("banner", "the title banner when the terminal starts", () => Settings.Banner, v => Set(nameof(HostSettings.Banner), v)),
         ReplSession.Number("budget.call", "thousands of Lua instructions per terminal line (1-2000)", () => Settings.ReplBudgetK, v => Set(nameof(HostSettings.ReplBudgetK), Math.Round(v)), 1, 2000),
         ReplSession.Switch("packs.autostart", "auto-start third-party Lua packs from other mods' moonscript/ folders", () => Settings.AutoStartThirdPartyPacks, v => Set(nameof(HostSettings.AutoStartThirdPartyPacks), v)),
+        ReplSession.Switch("kenshilua.autostart", "auto-start KenshiLua mods enabled in data/mods.cfg", () => Settings.AutoStartKenshiLua, v => Set(nameof(HostSettings.AutoStartKenshiLua), v)),
     ];
 
     // ---------------------------------------------------------------- ScriptHost API v1
