@@ -2,11 +2,11 @@
 
 ![MeitouMoonscript](docs/media/cover.jpg)
 
-> **Version 0.4.0** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
+> **Version 0.4.1** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
 
 | Hotkey / Command | What |
 |---|---|
-| **Shift+Y** | Open / close the Lua terminal (stands down while any text box has keyboard focus) |
+| **Shift+Y** | Open / close the Lua terminal (multi-line prompt continuation + `EDITOR` notepad tab; stands down while typing) |
 | F10 > Mods | Terminal open/close, terminal demo, `/battle` (5 Hungry Bandits), `/crawlers` (Cat Crawlers) |
 | `/battle [hungry\|dust\|beak]` | Animated 2D turn-based FF-style battle window (`scripts/fight.lua`) |
 | `/crawlers` | Clickable Cat Crawlers bar game window (`scripts/crawlers.lua`) |

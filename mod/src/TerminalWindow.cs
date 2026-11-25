@@ -25,7 +25,16 @@ public static class ReplWindow
     public static PzaWindow Window = null!;
     public static ReplSession? Session;
     static string s_draft = "";
-    static bool s_clearInput, s_wantFocus;
+    static string s_editorCode = DefaultEditorSnippet;
+    static bool s_clearInput, s_syncEditor, s_wantFocus;
+
+    const string DefaultEditorSnippet =
+        "-- Multi-line Lua Editor (click RUN CODE to execute)\n" +
+        "local sq = world.squad()\n" +
+        "print('Squad members: ' .. #sq)\n" +
+        "for i, m in ipairs(sq) do\n" +
+        "  print(string.format('  %d. %s (%s) HP %.0f/%.0f', i, m.name, m.weapon, m.hp, m.maxHp))\n" +
+        "end";
     static MethodInfo? s_focusEdit;
     static bool s_focusEditLooked;
     static readonly Queue<string> s_demo = new();
@@ -64,10 +73,24 @@ public static class ReplWindow
         return [.. w];
     }
 
+    static string[] EditorPage() =>
+    [
+        "<Widget type=\"EditBox\" skin=\"Kenshi_EditBox\" position_real=\"0.005 0.01 0.99 0.845\" name=\"edCode\">"
+            + "<Property key=\"MultiLine\" value=\"true\"/>"
+            + "<Property key=\"WordWrap\" value=\"true\"/>"
+            + "<Property key=\"TextAlign\" value=\"Left Top\"/>"
+            + $"<Property key=\"MaxTextLength\" value=\"{ReplCore.MaxEditorChars}\"/>"
+            + "</Widget>",
+        L.Button("btnRunCode", 0.005, 0.875, 0.34, 0.09),
+        L.Button("btnDemoCode", 0.36, 0.875, 0.32, 0.09),
+        L.Button("btnClearCode", 0.695, 0.875, 0.30, 0.09),
+    ];
+
     static string LayoutXml() => L.Doc(L.WindowMin("Root", "MOONSCRIPT TERMINAL", 0.22, 0.12, 0.56, 0.7,
         L.Tabs("Tabs", 0.02, 0.02, 0.96, 0.96,
             ("TabTerm", TerminalPage()),
-            L.HelpList("TabHelp", "lstHelp"))));
+            L.HelpList("TabHelp", "lstHelp"),
+            ("TabEdit", EditorPage()))));
 
     public static void Setup(HostSettings settings, Action<string, object> set, string folder)
     {
@@ -77,7 +100,7 @@ public static class ReplWindow
             Minimizable = true,
             Bind = Bind,
             Event = Event,
-            OpenChanged = open => s_wantFocus = open,
+            OpenChanged = open => { s_wantFocus = open; if (open) s_syncEditor = true; },
             LoadPlace = () => new Vector2((float)settings.WindowPlaceX, (float)settings.WindowPlaceY),
             SavePlace = p => { set(nameof(HostSettings.WindowPlaceX), Math.Round((double)p.X, 3)); set(nameof(HostSettings.WindowPlaceY), Math.Round((double)p.Y, 3)); },
         };
@@ -116,11 +139,18 @@ public static class ReplWindow
     {
         if (PzaUi.Host is not { } host || !host.IsOpen(Id)) { s_wantFocus = false; return; }
         int tab = host.GetTab(Id, "Tabs");
-        if (tab != 0)
+        if (tab == 1)
         {
             // MyGuiScreenHost.PressChrome changes tabs without blurring _focus, leaving hidden edIn holding UiEditing / PzaUi.Typing
             s_wantFocus = false;
             if (host.Focus is { Screen: Id }) host.Blur();
+            return;
+        }
+        if (tab == 2)
+        {
+            // EDITOR tab: blur hidden edIn if it still held focus, but let edCode keep keyboard focus while the user types
+            s_wantFocus = false;
+            if (host.Focus is { Screen: Id, Widget: "edIn" }) host.Blur();
             return;
         }
         if (!s_wantFocus) return;
@@ -162,11 +192,19 @@ public static class ReplWindow
     static void Bind(UiBindings b)
     {
         PzaWindow.Enable(b, "RunButton");
+        PzaWindow.Enable(b, "btnRunCode");
+        PzaWindow.Enable(b, "btnDemoCode");
+        PzaWindow.Enable(b, "btnClearCode");
         PzaWindow.TabText(b, "Tabs", 0, "TERMINAL");
         PzaWindow.TabText(b, "Tabs", 1, "HELP");
-        b.Text["RunButton"] = "RUN";
-        PzaWindow.Tooltip(b, "RunButton", "Run the line (Enter). Shift+Y opens and closes the terminal.");
+        PzaWindow.TabText(b, "Tabs", 2, "EDITOR");
+        b.Text["RunButton"] = Session?.Core.Continuing == true ? ">>" : "RUN";
+        b.Text["btnRunCode"] = "RUN CODE";
+        b.Text["btnDemoCode"] = "DEMO SNIPPET";
+        b.Text["btnClearCode"] = "CLEAR";
+        PzaWindow.Tooltip(b, "RunButton", "Run the line (Enter). Incomplete blocks automatically continue on the next line; /cancel clears.");
         if (s_clearInput) { b.Text["edIn"] = ""; s_clearInput = false; }
+        if (s_syncEditor) { b.Text["edCode"] = s_editorCode; s_syncEditor = false; }
         if (Session is { } s)
         {
             var core = s.Core;
@@ -198,7 +236,29 @@ public static class ReplWindow
     static void Event(MyGuiEvent e)
     {
         if (e.Widget == "edIn" && e.Action == "text") { s_draft = e.Text ?? ""; return; }
-        if (e.Action == "RunButton" || e.Widget == "RunButton") Submit(s_draft);
+        if (e.Widget == "edCode" && e.Action == "text") { s_editorCode = e.Text ?? ""; return; }
+        if (e.Action == "RunButton" || e.Widget == "RunButton") { Submit(s_draft); return; }
+        if (e.Action == "btnRunCode" || e.Widget == "btnRunCode")
+        {
+            Session?.Core.SubmitBlock(s_editorCode);
+            try { PzaUi.Host?.SetTab(Id, "Tabs", 0); } catch (Exception) { }
+            s_wantFocus = true;
+            return;
+        }
+        if (e.Action == "btnDemoCode" || e.Widget == "btnDemoCode")
+        {
+            s_editorCode = DefaultEditorSnippet;
+            s_syncEditor = true;
+            try { PzaUi.Host?.SetText(Id, "edCode", s_editorCode); } catch (Exception) { }
+            return;
+        }
+        if (e.Action == "btnClearCode" || e.Widget == "btnClearCode")
+        {
+            s_editorCode = "";
+            s_syncEditor = true;
+            try { PzaUi.Host?.SetText(Id, "edCode", ""); } catch (Exception) { }
+            return;
+        }
     }
 
     /// <summary>The newest `rows` lines (the scrollback shows its end; /clear empties it).</summary>

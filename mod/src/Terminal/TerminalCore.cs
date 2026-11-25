@@ -32,7 +32,7 @@ public interface IReplHost
 
 public sealed class ReplCore
 {
-    public const int MaxLines = 400, MaxLineChars = 160, MaxInput = 400;
+    public const int MaxLines = 400, MaxLineChars = 160, MaxInput = 4096, MaxBlockLines = 64, MaxEditorChars = 16384;
     public static readonly string[] SpinnerFrames = ["-", "\\", "|", "/"];
     public static readonly string[] Banner =
     [
@@ -44,6 +44,7 @@ public sealed class ReplCore
     readonly IReplHost _host;
     readonly List<(string Text, Ink Ink)> _lines = [];
     readonly Queue<(string Text, Ink Ink)> _queue = new();
+    readonly List<string> _block = [];
     string _typing = "";        // the queued line being revealed
     Ink _typingInk;
     double _shown;              // characters of _typing shown so far
@@ -51,6 +52,8 @@ public sealed class ReplCore
     public double CharsPerFrame { get; set; } = 6;
     public bool Animate { get; set; } = true;
     public string Status { get; private set; } = "ready";
+    public bool Continuing => _block.Count > 0;
+    public int PendingLines => _block.Count;
     public long LastInstructions { get; private set; }
     public string? LastScript { get; private set; }
     public int Changes { get; private set; }
@@ -152,14 +155,57 @@ public sealed class ReplCore
 
     public void Submit(string input)
     {
-        input = (input ?? "").Trim();
+        input = (input ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Trim();
         if (input.Length > MaxInput) input = input[..MaxInput];
         if (input.Length == 0) return;
         Flush();
-        Out("> " + input, Ink.Prompt);
-        if (input.StartsWith('/')) Command(input);
-        else RunLua(input, "terminal");
+        if (_block.Count > 0 && input.Equals("/cancel", StringComparison.OrdinalIgnoreCase))
+        {
+            _block.Clear();
+            Out("multi-line input cancelled.", Ink.Dim);
+            Status = "ready";
+            return;
+        }
+        if (_block.Count == 0 && input.StartsWith('/'))
+        {
+            Out("> " + input, Ink.Prompt);
+            Command(input);
+            return;
+        }
+        bool wasContinuing = _block.Count > 0;
+        foreach (var ln in input.Split('\n'))
+        {
+            Out((wasContinuing ? ".. " : "> ") + ln, Ink.Prompt);
+            wasContinuing = true;
+        }
+        string candidate = _block.Count > 0 ? string.Join("\n", _block) + "\n" + input : input;
+        if (_block.Count < MaxBlockLines && _host.CompileError("return " + candidate) is not null
+            && _host.CompileError(candidate) is { } err && IsIncompleteLua(err))
+        {
+            _block.Add(input);
+            Status = $"... ({_block.Count} line(s) buffered; finish block or /cancel)";
+            return;
+        }
+        _block.Clear();
+        RunLua(candidate, "terminal");
     }
+
+    /// <summary>Run a multi-line script from the EDITOR tab in the console's Lua state.</summary>
+    public void SubmitBlock(string code)
+    {
+        code = (code ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Trim();
+        if (code.Length > MaxEditorChars) code = code[..MaxEditorChars];
+        if (code.Length == 0) return;
+        Flush();
+        _block.Clear();
+        int lines = code.Count(c => c == '\n') + 1;
+        Out($"> [editor: {lines} line{(lines == 1 ? "" : "s")}]", Ink.Prompt);
+        RunLua(code, "editor");
+    }
+
+    static bool IsIncompleteLua(string err) =>
+        err.Contains("<eof>", StringComparison.OrdinalIgnoreCase)
+        || err.Contains("unfinished", StringComparison.OrdinalIgnoreCase);
 
     void Command(string input)
     {
@@ -183,7 +229,8 @@ public sealed class ReplCore
             case "/run": RunScript(arg); break;
             case "/reload": if (LastScript is null) Out("nothing run yet: /run <script> first", Ink.Error); else RunScript(LastScript); break;
             case "/config": Config(arg); break;
-            case "/reset": _host.ResetLua(); Out("Lua state reset.", Ink.Dim); Status = "reset"; break;
+            case "/reset": _block.Clear(); _host.ResetLua(); Out("Lua state reset.", Ink.Dim); Status = "reset"; break;
+            case "/cancel": _block.Clear(); Out("multi-line buffer is empty.", Ink.Dim); Status = "ready"; break;
             case "/packs": ListPacks(); break;
             case "/start": PackOp(arg, "start"); break;
             case "/stop": PackOp(arg, "stop"); break;
