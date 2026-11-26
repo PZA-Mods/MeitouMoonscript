@@ -491,7 +491,7 @@ SaveManager = {
             output($"[KL:{modId}] {msg}", Ink.Dim);
             return DynValue.Nil;
         });
-        box.RawScript.Globals.Get("KenshiLua").Table["version"] = "0.7.3-meitou";
+        box.RawScript.Globals.Get("KenshiLua").Table["version"] = "0.8.0-meitou";
         box.RawScript.Globals.Get("KenshiLua").Table["isMeitou"] = true;
 
         box.Expose("", "__kl_clock", _ => DynValue.NewNumber(s_clock.Elapsed.TotalSeconds));

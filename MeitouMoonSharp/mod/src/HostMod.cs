@@ -43,7 +43,7 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
         foreach (var l in kept) Line(l);
         if (!LiveSize.CanSeeCoroutines) Line("warning: this MoonSharp build's coroutine internals moved: data in suspended coroutines is not counted (tools/euler C5.live)");
 
-        context.AddSystem("pza.moonscript.snapshot", _ => new WorldSnapshot(), SystemAnchor.End);
+        context.AddSystem("pza.moonscript.snapshot", b => new WorldSnapshot(b.Find<Meitou.Simulation.Aggro.AggroSystem>()?.Relations), SystemAnchor.End);
         StartRepl(context);
         context.AddDebugCommand("Moonscript terminal: open / close (Shift+Y)", _ => { ReplWindow.Toggle(); return "terminal"; });
         context.AddDebugCommand("Moonscript terminal: play the demo", _ => { ReplWindow.Demo(); return "terminal demo"; });
@@ -115,6 +115,7 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
         PzaUi.Install(context);
         foreach (var l in ReplKeys.Install(context.Harmony)) Line(l);
         ReplKeys.Pressed = ReplWindow.Toggle;
+        ReplKeys.OnKeyDown = klHost.NotifyKeyDown;
     }
 
     static void Set(string key, object value) => PzaSettings.Set(s_group, Settings, key, value);

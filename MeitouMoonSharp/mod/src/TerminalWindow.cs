@@ -27,6 +27,8 @@ public static class ReplWindow
     static string s_draft = "";
     static string s_editorCode = DefaultEditorSnippet;
     static bool s_clearInput, s_syncEditor, s_wantFocus;
+    static int s_scroll;
+    static int s_lastMaxScroll;
 
     const string DefaultEditorSnippet =
         "-- Multi-line Lua Editor (click RUN CODE to execute)\n" +
@@ -66,8 +68,13 @@ public static class ReplWindow
             "<Widget type=\"ImageBox\" skin=\"ImageBox\" position_real=\"0.005 0.01 0.99 0.004\" name=\"Rule\"/>",
         };
         const double top = 0.022, height = 0.76;
-        for (int i = 0; i < Rows; i++) w.Add(L.Text(RowName(i), 0.02, top + i * height / Rows, 0.96, height / Rows));
-        w.Add(L.Text("lbStatus", 0.02, 0.795, 0.96, 0.05));
+        for (int i = 0; i < Rows; i++) w.Add(L.Text(RowName(i), 0.015, top + i * height / Rows, 0.90, height / Rows));
+        // Compact right-rail scroll controls (PG UP, UP, DN, END) so long output is always readable
+        w.Add(L.Button("btnPgUp", 0.922, 0.025, 0.068, 0.07));
+        w.Add(L.Button("btnUp",   0.922, 0.105, 0.068, 0.07));
+        w.Add(L.Button("btnDn",   0.922, 0.625, 0.068, 0.07));
+        w.Add(L.Button("btnEnd",  0.922, 0.705, 0.068, 0.07));
+        w.Add(L.Text("lbStatus", 0.015, 0.795, 0.97, 0.05));
         w.Add(L.Edit("edIn", 0.005, 0.875, 0.80, 0.09, maxLength: ReplCore.MaxInput));
         w.Add(L.Button("RunButton", 0.82, 0.875, 0.175, 0.09, isDefault: true));
         return [.. w];
@@ -179,6 +186,7 @@ public static class ReplWindow
     static void Submit(string line)
     {
         Submitted++;
+        s_scroll = 0;
         Session?.Core.Submit(line);
         s_draft = "";
         s_clearInput = true;
@@ -192,6 +200,10 @@ public static class ReplWindow
     static void Bind(UiBindings b)
     {
         PzaWindow.Enable(b, "RunButton");
+        PzaWindow.Enable(b, "btnPgUp");
+        PzaWindow.Enable(b, "btnUp");
+        PzaWindow.Enable(b, "btnDn");
+        PzaWindow.Enable(b, "btnEnd");
         PzaWindow.Enable(b, "btnRunCode");
         PzaWindow.Enable(b, "btnDemoCode");
         PzaWindow.Enable(b, "btnClearCode");
@@ -199,18 +211,34 @@ public static class ReplWindow
         PzaWindow.TabText(b, "Tabs", 1, "HELP");
         PzaWindow.TabText(b, "Tabs", 2, "EDITOR");
         b.Text["RunButton"] = Session?.Core.Continuing == true ? ">>" : "RUN";
+        b.Text["btnPgUp"] = "^^";
+        b.Text["btnUp"] = "^";
+        b.Text["btnDn"] = "v";
+        b.Text["btnEnd"] = "END";
         b.Text["btnRunCode"] = "RUN CODE";
         b.Text["btnDemoCode"] = "DEMO SNIPPET";
         b.Text["btnClearCode"] = "CLEAR";
+        PzaWindow.Tooltip(b, "btnPgUp", "Scroll up one page");
+        PzaWindow.Tooltip(b, "btnUp", "Scroll up 4 lines");
+        PzaWindow.Tooltip(b, "btnDn", "Scroll down 4 lines");
+        PzaWindow.Tooltip(b, "btnEnd", "Jump to latest output");
         PzaWindow.Tooltip(b, "RunButton", "Run the line (Enter). Incomplete blocks automatically continue on the next line; /cancel clears.");
         if (s_clearInput) { b.Text["edIn"] = ""; s_clearInput = false; }
         if (s_syncEditor) { b.Text["edCode"] = s_editorCode; s_syncEditor = false; }
         if (Session is { } s)
         {
             var core = s.Core;
-            b.Text["lbStatus"] = $"{core.Spinner}  {(core.Busy ? "typing" : core.Status)}   |   last {core.LastInstructions.ToString("N0", CultureInfo.InvariantCulture)} instructions   |   Lua 5.2 sandbox   |   /help";
+            var panelBounds = PzaUi.Host?.LastFrame.FirstOrDefault(f => f.Id == Id)?.Controls.FirstOrDefault(c => c.Name == "Panel")?.Bounds;
+            int wrapCols = panelBounds is { Width: > 100 } pb ? Math.Clamp((int)(pb.Width * 0.90f / 8.2f), 48, 120) : 78;
+            var wrapped = Wrap(core.Visible().ToList(), wrapCols);
+            int maxScroll = Math.Max(0, wrapped.Count - Rows);
+            s_lastMaxScroll = maxScroll;
+            if (s_scroll > maxScroll) s_scroll = maxScroll;
+            if (s_scroll < 0) s_scroll = 0;
+            string scrollNote = s_scroll > 0 ? $"   |   scroll -{s_scroll}/{wrapped.Count} (END)" : "";
+            b.Text["lbStatus"] = $"{core.Spinner}  {(core.Busy ? "typing" : core.Status)}   |   last {core.LastInstructions.ToString("N0", CultureInfo.InvariantCulture)} instr{scrollNote}   |   /help";
             PzaWindow.Props(b, "lbStatus", ("TextColour", Colour(core.Busy ? Ink.Accent : Ink.Dim)));
-            var shown = Tail(core.Visible().ToList(), Rows);
+            var shown = Slice(wrapped, Rows, s_scroll);
             for (int i = 0; i < Rows; i++)
             {
                 var (text, ink) = i < shown.Count ? shown[i] : ("", Ink.Text);
@@ -238,8 +266,13 @@ public static class ReplWindow
         if (e.Widget == "edIn" && e.Action == "text") { s_draft = e.Text ?? ""; return; }
         if (e.Widget == "edCode" && e.Action == "text") { s_editorCode = e.Text ?? ""; return; }
         if (e.Action == "RunButton" || e.Widget == "RunButton") { Submit(s_draft); return; }
+        if (e.Action == "btnPgUp" || e.Widget == "btnPgUp") { s_scroll = Math.Min(s_lastMaxScroll, s_scroll + Math.Max(1, Rows - 2)); return; }
+        if (e.Action == "btnUp" || e.Widget == "btnUp") { s_scroll = Math.Min(s_lastMaxScroll, s_scroll + 4); return; }
+        if (e.Action == "btnDn" || e.Widget == "btnDn") { s_scroll = Math.Max(0, s_scroll - 4); return; }
+        if (e.Action == "btnEnd" || e.Widget == "btnEnd") { s_scroll = 0; return; }
         if (e.Action == "btnRunCode" || e.Widget == "btnRunCode")
         {
+            s_scroll = 0;
             Session?.Core.SubmitBlock(s_editorCode);
             try { PzaUi.Host?.SetTab(Id, "Tabs", 0); } catch (Exception) { }
             s_wantFocus = true;
@@ -261,7 +294,47 @@ public static class ReplWindow
         }
     }
 
+    /// <summary>Word-wraps logical output lines to `maxCols` so long lines never clip off the right edge.</summary>
+    public static List<(string Text, Ink Ink)> Wrap(IReadOnlyList<(string Text, Ink Ink)> lines, int maxCols)
+    {
+        maxCols = Math.Max(20, maxCols);
+        var outLines = new List<(string Text, Ink Ink)>(lines.Count);
+        foreach (var (raw, ink) in lines)
+        {
+            string s = raw ?? "";
+            if (s.Length <= maxCols) { outLines.Add((s, ink)); continue; }
+            int pos = 0;
+            bool first = true;
+            while (pos < s.Length)
+            {
+                int avail = first ? maxCols : Math.Max(16, maxCols - 2);
+                int rem = s.Length - pos;
+                if (rem <= avail)
+                {
+                    outLines.Add(((first ? "" : "  ") + s[pos..], ink));
+                    break;
+                }
+                int cut = s.LastIndexOf(' ', pos + avail, Math.Min(avail, rem));
+                if (cut <= pos + avail / 3) cut = pos + avail;
+                string chunk = s[pos..cut].TrimEnd();
+                outLines.Add(((first ? "" : "  ") + chunk, ink));
+                pos = cut;
+                while (pos < s.Length && s[pos] == ' ') pos++;
+                first = false;
+            }
+        }
+        return outLines;
+    }
+
+    /// <summary>Returns a `rows`-sized window into `lines`, offset `scrollFromBottom` lines above the end.</summary>
+    public static List<(string Text, Ink Ink)> Slice(List<(string Text, Ink Ink)> lines, int rows, int scrollFromBottom)
+    {
+        if (lines.Count <= rows) return lines;
+        int end = Math.Clamp(lines.Count - Math.Max(0, scrollFromBottom), rows, lines.Count);
+        return lines.GetRange(end - rows, rows);
+    }
+
     /// <summary>The newest `rows` lines (the scrollback shows its end; /clear empties it).</summary>
     public static List<(string Text, Ink Ink)> Tail(List<(string Text, Ink Ink)> lines, int rows) =>
-        lines.Count <= rows ? lines : lines.GetRange(lines.Count - rows, rows);
+        Slice(lines, rows, 0);
 }

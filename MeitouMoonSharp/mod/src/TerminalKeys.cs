@@ -12,7 +12,19 @@ public static class ReplKeys
 {
     public static long Fired, Blocked;
     public static Action? Pressed;
+    public static Action<int>? OnKeyDown;
     static bool s_uiShift;
+
+    static readonly (Key Key, int Vk)[] s_forwardKeys =
+    [
+        (Key.A, 0x41), (Key.B, 0x42), (Key.C, 0x43), (Key.D, 0x44), (Key.E, 0x45), (Key.F, 0x46), (Key.G, 0x47),
+        (Key.H, 0x48), (Key.I, 0x49), (Key.J, 0x4A), (Key.K, 0x4B), (Key.L, 0x4C), (Key.M, 0x4D), (Key.N, 0x4E),
+        (Key.O, 0x4F), (Key.P, 0x50), (Key.Q, 0x51), (Key.R, 0x52), (Key.S, 0x53), (Key.T, 0x54), (Key.U, 0x55),
+        (Key.V, 0x56), (Key.W, 0x57), (Key.X, 0x58), (Key.Y, 0x59), (Key.Z, 0x5A),
+        (Key.D0, 0x30), (Key.D1, 0x31), (Key.D2, 0x32), (Key.D3, 0x33), (Key.D4, 0x34),
+        (Key.D5, 0x35), (Key.D6, 0x36), (Key.D7, 0x37), (Key.D8, 0x38), (Key.D9, 0x39),
+        (Key.Space, 0x20), (Key.Tab, 0x09), (Key.Escape, 0x1B),
+    ];
 
     public static List<string> Install(Harmony h)
     {
@@ -77,10 +89,20 @@ public static class ReplKeys
     {
         try
         {
+            if (PZA.MeitouUi.PzaUi.Typing) return;
             bool shift = input.IsDown(Key.LeftShift) || input.IsDown(Key.RightShift);
             bool ctrlAlt = input.IsDown(Key.LeftControl) || input.IsDown(Key.RightControl) || input.IsDown(Key.LeftAlt) || input.IsDown(Key.RightAlt);
-            if (!shift || ctrlAlt || PZA.MeitouUi.PzaUi.Typing) return;
-            if (input.WasPressed(Key.Y)) { Fired++; Pressed?.Invoke(); }
+            if (shift && !ctrlAlt && input.WasPressed(Key.Y))
+            {
+                Fired++;
+                Pressed?.Invoke();
+                return;
+            }
+            if (OnKeyDown is { } kd)
+            {
+                foreach (var (k, vk) in s_forwardKeys)
+                    if (input.WasPressed(k)) kd(vk);
+            }
         }
         catch (Exception e)
         {

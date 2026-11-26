@@ -5,6 +5,7 @@
 using System.Collections.Concurrent;
 using System.Numerics;
 using Meitou.Data.Fcs;
+using Meitou.Data.Gameplay;
 using Meitou.Data.Gameplay.Bodies;
 using Meitou.Simulation;
 using Meitou.Simulation.Combat;
@@ -32,6 +33,7 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
     static volatile CameraSnap? s_camera;
     static readonly ConcurrentQueue<GameEvent> s_events = new();
     static readonly ConcurrentQueue<WorldAction> s_actions = new();
+    readonly FactionRelations? _relations;
     int _lastWholeHour = -1, _lastDay = -1;
     public static long Ticks;
 
@@ -68,8 +70,9 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
     }
 
     /// <summary>A new world: nothing from the old one carries over.</summary>
-    public WorldSnapshot()
+    public WorldSnapshot(FactionRelations? relations = null)
     {
+        _relations = relations;
         s_hours = null; s_cats = null; s_selected = null; s_squad = []; s_squadIds = []; s_scan = WorldScanSnapshot.Empty; s_camera = null;
         while (s_events.TryDequeue(out _)) { }
         while (s_actions.TryDequeue(out _)) { }
@@ -366,7 +369,7 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
         return opt != SquadAi.None;
     }
 
-    static void CaptureWorldScan(World world)
+    void CaptureWorldScan(World world)
     {
         try
         {
@@ -391,7 +394,7 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                 double blood = 100;
                 if (cold.Medical is { } m)
                 {
-                    blood = Math.Clamp(100.0 - Math.Max(0, m.Bleeding) * 20.0, 0, 100);
+                    blood = float.IsFinite(m.Blood) ? Math.Clamp(m.Blood, 0, 200) : 100;
                     if (m.Parts.Count > 0)
                     {
                         int pn = Math.Min(m.Parts.Count, 12);
@@ -404,20 +407,36 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                                 || pName.Contains("head", StringComparison.OrdinalIgnoreCase)
                                 || pName.Contains("chest", StringComparison.OrdinalIgnoreCase)
                                 || pName.Contains("stomach", StringComparison.OrdinalIgnoreCase);
-                            parts.Add(new BodyPartSnap(pName, pt.Flesh, pt.Stun, Math.Max(1, pt.MaxHp), fatal));
+                            parts.Add(new BodyPartSnap(pName, pt.Flesh, pt.Stun, Math.Max(1, pt.MaxHp), fatal, pt.Wear, pt.Rig));
                         }
                     }
                 }
                 double tough = cold.Stats is { } st ? CleanStat(st[StatsEnumerated.Toughness]) : 1;
+                int rel = 0;
                 bool isAlly = cold.IsPlayer || (playerFaction >= 0 && cold.Faction == playerFaction);
                 bool isEnemy = !isAlly && cold.InCombat;
+                if (_relations is not null && playerFaction >= 0 && cold.Faction >= 0)
+                {
+                    float r = _relations.Get(playerFaction, cold.Faction);
+                    if (float.IsFinite(r))
+                    {
+                        rel = (int)MathF.Round(r);
+                        if (!isAlly && r >= FactionRelations.AllyThreshold) isAlly = true;
+                        if (!isAlly && r <= FactionRelations.HostileThreshold) isEnemy = true;
+                    }
+                }
+                else
+                {
+                    rel = isAlly ? 100 : (isEnemy ? -50 : 0);
+                }
                 chars.Add(new CharSnap(
                     id.Slot, id.Generation,
                     string.IsNullOrWhiteSpace(cold.Name) ? "Drifter" : cold.Name.Trim(),
                     cold.Faction, cold.IsPlayer,
                     hot.Position.X, hot.Position.Y, hot.Position.Z,
                     hot.Health, down, dead, cold.InCombat, cold.SquadId,
-                    parts, tough, blood, 100, uncon, isAlly ? 100 : (isEnemy ? -50 : 0), isEnemy, isAlly));
+                    parts, tough, blood, 100, uncon, rel, isEnemy, isAlly,
+                    TemplateId: cold.RecordId ?? ""));
                 if (cold.IsPlayer && cold.Inventory is { } inv && inv.Items.Count > 0)
                 {
                     int n = Math.Min(inv.Items.Count, 32);
