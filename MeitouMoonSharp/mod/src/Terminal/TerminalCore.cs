@@ -65,6 +65,8 @@ public sealed class ReplCore
     public PackHost? Packs { get; set; }
     /// <summary>1:1 KenshiLua compat host for &lt;Mod&gt;/scripts/init/*.lua (optional).</summary>
     public PZA.Moonscript.KenshiLua.KenshiLuaHost? KenshiLua { get; set; }
+    /// <summary>Meitou 0.24.0+ runs KenshiLua mods itself (Meitou.Lua): /kl then only lists and stops, so no mod runs twice.</summary>
+    public bool KenshiLuaRetired { get; set; }
 
     public ReplCore(IReplHost host, bool banner = true)
     {
@@ -265,7 +267,9 @@ public sealed class ReplCore
         Out("  /battle [fight]    animated FF-style turn-based battle: hungry, dust, beak", Ink.Text);
         Out("  /crawlers          clickable Cat Crawlers bar game window (scripts/crawlers.lua)", Ink.Text);
         Out("  /packs             list Lua packs; /start, /stop, /restart, /allow, /revoke <pack>", Ink.Text);
-        Out("  /kl [list|allow|start|stop|revoke]  manage KenshiLua compat mods (scripts/init/*.lua)", Ink.Text);
+        Out(KenshiLuaRetired
+            ? "  /kl [list|stop|revoke]  the old KenshiLua layer (retired: Meitou 0.24.0+ runs KenshiLua mods itself)"
+            : "  /kl [list|allow|start|stop|revoke]  KenshiLua mods (scripts/init/*.lua) on Meitou before 0.24.0", Ink.Text);
         if (Packs is not null)
         {
             var custom = Packs.RegisteredCommands();
@@ -318,6 +322,11 @@ public sealed class ReplCore
         if (KenshiLua is null) { Out("KenshiLua compat host is not enabled here", Ink.Dim); return; }
         var parts = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
         string sub = parts.Length > 0 ? parts[0].ToLowerInvariant() : "list";
+        if (KenshiLuaRetired && sub is "start" or "allow")
+        {
+            Out("retired here: this Meitou (0.24.0+) runs KenshiLua mods itself, so Moonscript's old layer stays off (no mod runs twice)", Ink.Dim);
+            return;
+        }
         string target = parts.Length > 1 ? parts[1].Trim() : "";
         if (sub == "list")
         {

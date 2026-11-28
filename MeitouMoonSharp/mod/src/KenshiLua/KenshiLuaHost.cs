@@ -23,7 +23,7 @@ public sealed class KenshiLuaHost
     readonly string? _workshopRoot;
     readonly string? _selfModFolder;
     readonly string? _grantsPath;
-    readonly string? _stateDir;
+    readonly PZA.Moonscript.Repl.PackStore? _store;
     readonly Func<double?> _hours;
     readonly Func<long?> _cats;
     readonly Func<string?> _selected;
@@ -61,9 +61,9 @@ public sealed class KenshiLuaHost
         Func<WorldScanSnapshot> scan, Func<CameraSnap?> camera,
         Action<WorldAction> enqueueAction, HudState? hud,
         Func<ScriptLimits> limits, Action<string, Ink> output, Action<string> log,
-        string? stateDir = null, string? workshopRoot = null, Func<(int W, int H)>? viewSize = null)
+        PZA.Moonscript.Repl.PackStore? store = null, string? workshopRoot = null, Func<(int W, int H)>? viewSize = null)
     {
-        _modsRoot = modsRoot; _selfModFolder = selfModFolder; _grantsPath = grantsPath; _stateDir = stateDir;
+        _modsRoot = modsRoot; _selfModFolder = selfModFolder; _grantsPath = grantsPath; _store = store;
         _workshopRoot = workshopRoot ?? DeriveWorkshopRoot(modsRoot);
         _hours = hours; _cats = cats; _selected = selected;
         _scan = scan; _camera = camera; _enqueueAction = enqueueAction; _hud = hud;
@@ -291,42 +291,53 @@ public sealed class KenshiLuaHost
         return (true, $"stopped KenshiLua mod '{m.Info.ModId}'");
     }
 
-    string? ModSavePath(string modId) =>
-        string.IsNullOrEmpty(_stateDir) ? null : HostedScript.SafePath(_stateDir, "kl_" + modId.ToLowerInvariant() + ".json");
+    // The save bag (onPlayerSerialise): held per save in the shared PackStore under "kl:<mod>" since 0.12.0 (C7b), not per install.
+    static string BagKey(string modId) => "kl:" + modId.ToLowerInvariant();
 
     void FirePlayerLoad(ModRuntime m)
     {
         if (m.Box is null || m.Box.Faulted) return;
         string raw = "{}";
-        string? path = ModSavePath(m.Info.ModId);
-        if (path is not null && File.Exists(path))
+        if (_store?.Get(BagKey(m.Info.ModId)) is { Length: > 0 and <= MaxSaveBytes } bytes)
         {
-            try
-            {
-                var fi = new FileInfo(path);
-                if (fi.Length > 0 && fi.Length <= MaxSaveBytes) raw = File.ReadAllText(path);
-            }
-            catch (Exception) { }
+            try { raw = new System.Text.UTF8Encoding(false, true).GetString(bytes); }
+            catch (Exception) { raw = "{}"; }
         }
         m.Box.RawScript.Globals["__kl_gd_raw"] = DynValue.NewString(raw);
-        m.Box.Eval("__kl_dispatch('onPlayerLoadFromSerialise', getGameWorld().player, __kl_make_gamedata(__kl_gd_raw))");
+        m.Box.Eval("local gd = __kl_make_gamedata(__kl_gd_raw); __kl_dispatch('onPlayerLoadFromSerialise', getGameWorld().player, gd); __kl_dispatch('PlayerInterface::loadFromSerialise', getGameWorld().player, gd)");
     }
 
     void FirePlayerSerialise(ModRuntime m)
     {
-        if (m.Box is null || m.Box.Faulted) return;
-        string? path = ModSavePath(m.Info.ModId);
-        if (path is null) return;
+        if (m.Box is null || m.Box.Faulted || _store is null) return;
         try
         {
-            var res = m.Box.Eval("local gd = __kl_make_gamedata('{}'); __kl_dispatch('onPlayerSerialise', getGameWorld().player, gd); return json.encode(gd:toTable())");
+            var res = m.Box.Eval("local gd = __kl_make_gamedata('{}'); __kl_dispatch('onPlayerSerialise', getGameWorld().player, gd); __kl_dispatch('PlayerInterface::serialise', getGameWorld().player, gd); return json.encode(gd:toTable())");
             if (res.Type == DataType.String && res.String.Length > 2 && res.String.Length <= MaxSaveBytes)
-            {
-                Directory.CreateDirectory(_stateDir!);
-                File.WriteAllText(path, res.String);
-            }
+                _store.Set(BagKey(m.Info.ModId), System.Text.Encoding.UTF8.GetBytes(res.String));
         }
         catch (Exception e) { _log($"KenshiLua '{m.Info.ModId}' save failed: {e.Message}"); }
+    }
+
+    /// <summary>Refreshes every running mod's save bag in the store (once a game hour, so a game save holds at most an hour-old bag).</summary>
+    public void SerialiseRunning()
+    {
+        foreach (var m in _mods.Values) if (m.Running && m.Box is { Faulted: false }) FirePlayerSerialise(m);
+    }
+
+    /// <summary>A new world (C7b), as PackHost.StopRunning / StartAgain.</summary>
+    public IReadOnlyList<string> StopRunning()
+    {
+        var running = _mods.Values.Where(x => x.Running).Select(x => x.Info.ModId).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var id in running) Stop(id);
+        return running;
+    }
+
+    public IReadOnlyList<string> StartAgain(IReadOnlyList<string> ids)
+    {
+        var started = new List<string>();
+        foreach (var id in ids) if (StartCore(id, autoApproved: true).ok) started.Add(id);   // it was running: already approved or auto-started
+        return started;
     }
 
     DynValue ScopedRequire(ModRuntime m, CallbackArguments a)
@@ -413,7 +424,7 @@ public sealed class KenshiLuaHost
                 }
             }
 
-            m.Box.Eval("__kl_dispatch('onCharsUpdate', getGameWorld())");
+            m.Box.Eval("__kl_dispatch('onCharsUpdate', getGameWorld()); __kl_dispatch('GameWorld::charsUpdate', getGameWorld())");
             used += m.Box.LastCallInstructions;
             if (m.Box.Faulted)
             {

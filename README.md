@@ -2,7 +2,7 @@
 
 ![MeitouMoonscript](docs/media/cover.jpg)
 
-> **Version 0.7.0** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
+> **Version 0.12.0** · Meitou `>=0.20.1` · ScriptHost API **1** · MoonSharp 3.0.0-beta.1 · Mod id `pza.moonscript`
 
 | Hotkey / Command | What |
 |---|---|
@@ -20,6 +20,21 @@ Other modders can either:
 2. Depend on `pza.moonscript` from C# (`IScriptHost` v1) to run isolated, deterministic Lua scripts with save/restore and hot reload.
 
 See **[docs/MODDER-GUIDE.md](docs/MODDER-GUIDE.md)** for the full pack & API guide.
+
+## Built into Meitou since 0.24.0
+
+Moonscript's KenshiLua work is now part of Meitou itself. **Meitou 0.24.0 ships Meitou.Lua**, a built-in KenshiLua compatibility runtime,
+from PZA's pull requests [VlcekM/MeitouClient#1494](https://github.com/VlcekM/MeitouClient/pull/1494) (the runtime) and
+[#1537](https://github.com/VlcekM/MeitouClient/pull/1537) (coroutine scheduler, live hot reload). Old `scripts/init/*.lua` mods run on
+Meitou with no add-on.
+
+So from 0.12.0 Moonscript's own KenshiLua layer is **retired** on Meitou 0.24.0 and later: it never starts there (`/kl` only lists and
+stops), so no mod runs twice. It stays, frozen, for Meitou 0.20.1 to 0.23.x. What Moonscript is for now: the Lua add-on other mods can
+use (packs, permissions, the Shift+Y console, `IScriptHost`, `IPackExtensionHost`).
+
+**0.12.0: pack state is per save.** A pack's `pack.save()` state (and the old layer's save bag) now lives in each save's own Meitou mod
+data, not in one `pack_states` folder per install: a new game starts clean, and loading a save gives each pack that save's state
+(claim C7b, checked by brute force over every sequence of up to 4 saves, loads and new games). State in the old `pack_states` folder is no longer read; the folder is left as it was.
 
 ![the terminal in Meitou](docs/media/terminal-demo.gif)
 
@@ -64,7 +79,7 @@ With zero C# (just a `pack.json` + `main.lua`)—or paired with a C# extension m
 - **No** files, `os`, `io`, `load` / `require` / `dofile`, `debug`, `collectgarbage`, `string.dump`, platform facts or wall clock. `math.random` is a deterministic seeded SplitMix64 generator saved with the script.
 - **Hard budgets & caps**: instruction budgets per call and per tick (counted across coroutines and callbacks), allocation/live-size caps, and a call-depth cap on a dedicated 16 MB Lua thread. A faulting script is cleanly disabled for that world with one log line; the game goes on.
 
-All sandbox and determinism claims (C1–C8, B1–B6) are verified by the automated Euler suite and 16 fuzz targets: see [tools/euler/CLAIMS.md](tools/euler/CLAIMS.md).
+All sandbox and determinism claims (C1–C8, B1–B6) are verified by the automated Euler suite and 16 fuzz targets: written up in the developer's claims file (tools/euler/CLAIMS.md, not part of this source).
 
 ## ScriptHost API (version 1)
 

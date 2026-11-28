@@ -19,6 +19,12 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
     static ModSettingsGroup? s_group;
     static Action<string>? s_log;
     static PackHost? s_packs;
+    static KenshiLuaHost? s_kl;
+    static readonly PackStore s_store = new();
+    static readonly object s_worldLock = new();
+    static (int World, Dictionary<string, byte[]> Entries, bool FromSave)? s_pendingWorld;
+    static volatile int s_appliedWorld;
+    static int s_lastBagHour = int.MinValue;
     static readonly List<(string Owner, string Cap, IReadOnlyList<HostFunction> Fns)> s_pendingExtensions = [];
     static readonly Dictionary<string, int> s_opened = new(StringComparer.Ordinal);
 
@@ -44,6 +50,10 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
         if (!LiveSize.CanSeeCoroutines) Line("warning: this MoonSharp build's coroutine internals moved: data in suspended coroutines is not counted (tools/euler C5.live)");
 
         context.AddSystem("pza.moonscript.snapshot", b => new WorldSnapshot(b.Find<Meitou.Simulation.Aggro.AggroSystem>()?.Relations), SystemAnchor.End);
+        context.AddSystem("pza.moonscript.packs", _ => new PackSaveSystem(s_store, Line), SystemAnchor.End);
+        if (Directory.Exists(Path.Combine(context.Folder, "pack_states")))
+            Line("the pack_states folder is from before 0.12.0 (one per install) and is no longer read: each save keeps its own pack state now; the folder is left as it was");
+        Bridge.OrgBridgeSystem.Attach(context, this, Line);   // read-only views of Dustlife, the Composer and TWR for packs (claims O1-O5)
         StartRepl(context);
         context.AddDebugCommand("Moonscript terminal: open / close (Shift+Y)", _ => { ReplWindow.Toggle(); return "terminal"; });
         context.AddDebugCommand("Moonscript terminal: play the demo", _ => { ReplWindow.Demo(); return "terminal demo"; });
@@ -72,15 +82,16 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
             () => WorldSnapshot.Squad, () => WorldSnapshot.Cats,
             () => new ScriptLimits { InstructionsPerCall = (long)(Settings.ReplBudgetK * 1000), InstructionsPerTick = long.MaxValue / 4 },
             ReplWindow.Session.Core.Out, Line, modsRoot, selfFolder, Path.Combine(context.Folder, "packs.grants.json"),
-            () => WorldSnapshot.Scan, WorldSnapshot.EnqueueAction, Path.Combine(context.Folder, "pack_states"),
+            () => WorldSnapshot.Scan, WorldSnapshot.EnqueueAction, s_store,
             () => WorldSnapshot.Camera, HudWindow.State);
         var klHost = new KenshiLuaHost(modsRoot, selfFolder, Path.Combine(context.Folder, "kenshilua.grants.json"),
             () => WorldSnapshot.Hours, () => WorldSnapshot.Cats, () => WorldSnapshot.SelectedName,
             () => WorldSnapshot.Scan, () => WorldSnapshot.Camera, WorldSnapshot.EnqueueAction, HudWindow.State,
             () => new ScriptLimits { InstructionsPerCall = (long)(Settings.ReplBudgetK * 1000), InstructionsPerTick = long.MaxValue / 4 },
-            ReplWindow.Session.Core.Out, Line, Path.Combine(context.Folder, "pack_states"),
+            ReplWindow.Session.Core.Out, Line, s_store,
             viewSize: () => (HudWindow.ViewWidth, HudWindow.ViewHeight));
         s_packs = packs;
+        s_kl = klHost;
         HudWindow.OnButtonClick = (owner, btnId) =>
         {
             packs.DispatchHudClick(owner, btnId);
@@ -93,9 +104,14 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
         }
         ReplWindow.Session.Core.Packs = packs;
         ReplWindow.Session.Core.KenshiLua = klHost;
+        ReplWindow.Session.Core.KenshiLuaRetired = BuiltInLua;
         foreach (var (m, _, _, _) in packs.List())
             if (!m.ThirdParty || Settings.AutoStartThirdPartyPacks) packs.Start(m.Id);
-        if (Settings.AutoStartKenshiLua)
+        if (BuiltInLua)
+        {
+            Line("KenshiLua layer retired here: Meitou 0.24.0+ runs KenshiLua mods itself (Meitou.Lua); the console, packs and minigames stay on");
+        }
+        else if (Settings.AutoStartKenshiLua)
         {
             var klStarted = klHost.StartEnabledFromModsCfg();
             if (klStarted.Count > 0)
@@ -108,6 +124,12 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
             ReplWindow.EachFrame(Settings);
             BattleWindow.EachFrame();
             HudWindow.EachFrame();
+            ApplyWorld();
+            if (WorldSnapshot.Hours is double gh && (int)Math.Floor(gh) != s_lastBagHour && s_appliedWorld != 0)
+            {
+                s_lastBagHour = (int)Math.Floor(gh);
+                klHost.SerialiseRunning();
+            }
             var evs = WorldSnapshot.DrainEvents();
             packs.Tick(WorldSnapshot.Hours, evs);
             klHost.Tick(evs);
@@ -116,6 +138,42 @@ public sealed class HostMod : IMod, IScriptHost, IPackExtensionHost, IModDepende
         foreach (var l in ReplKeys.Install(context.Harmony)) Line(l);
         ReplKeys.Pressed = ReplWindow.Toggle;
         ReplKeys.OnKeyDown = klHost.NotifyKeyDown;
+    }
+
+    /// <summary>Meitou 0.24.0+ ships its own KenshiLua runtime (VlcekM/MeitouClient#1494, Meitou.Lua): Moonscript's layer is retired there.</summary>
+    public static readonly bool BuiltInLua = HasBuiltInMeitouLua();
+
+    static bool HasBuiltInMeitouLua() =>
+        typeof(ModContext).Assembly.GetType("Meitou.Modding.LuaMods", throwOnError: false) is not null
+        || Type.GetType("Meitou.Lua.KenshiLuaHost, Meitou.Lua", throwOnError: false) is not null;
+
+    /// <summary>World side (PackSaveSystem's first tick): a new world runs, with these saved entries (none for a new game).</summary>
+    internal static void QueueWorld(int world, Dictionary<string, byte[]> entries, bool fromSave)
+    {
+        lock (s_worldLock) s_pendingWorld = (world, entries, fromSave);
+    }
+
+    /// <summary>The world whose entries the store holds now; a save of any other world writes what it loaded with.</summary>
+    internal static int AppliedWorld => s_appliedWorld;
+
+    /// <summary>Interface side, each frame: swap the packs over to a new world's state (C7b).</summary>
+    static void ApplyWorld()
+    {
+        (int World, Dictionary<string, byte[]> Entries, bool FromSave) w;
+        lock (s_worldLock)
+        {
+            if (s_pendingWorld is not { } p) return;
+            w = p; s_pendingWorld = null;
+        }
+        var packs = s_packs?.StopRunning() ?? [];
+        var mods = s_kl?.StopRunning() ?? [];
+        s_store.Replace(w.Entries);
+        s_appliedWorld = w.World;
+        s_lastBagHour = int.MinValue;
+        int a = s_packs?.StartAgain(packs).Count ?? 0, b = s_kl?.StartAgain(mods).Count ?? 0;
+        Line(w.FromSave
+            ? $"packs: this save's state loaded ({w.Entries.Count} entr{(w.Entries.Count == 1 ? "y" : "ies")}); {a} pack(s) and {b} KenshiLua mod(s) restarted"
+            : $"packs: a new world, so packs start clean; {a} pack(s) and {b} KenshiLua mod(s) restarted");
     }
 
     static void Set(string key, object value) => PzaSettings.Set(s_group, Settings, key, value);

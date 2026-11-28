@@ -1,0 +1,10 @@
+{
+  "id": "war-ticker",
+  "name": "War Ticker",
+  "author": "PZA",
+  "version": "0.1.0",
+  "side": "ui",
+  "entry": "main.lua",
+  "permissions": ["commands", "timers", "ui.hud", "dustlife.read", "composer.read", "twr.read"],
+  "description": "Starter bridge pack: /warticker shows Dustlife's war news on the HUD with the Composer's phase and TWR's heat (read only; off until you turn it on)"
+}

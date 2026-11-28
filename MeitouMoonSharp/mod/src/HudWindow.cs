@@ -48,7 +48,7 @@ public static class HudWindow
 
     public static void Setup()
     {
-        Window = new PzaWindow(Id, LayoutXml) { Bind = Bind, Event = Event };
+        Window = new PzaWindow(Id, LayoutXml) { Panel = true, Bind = Bind, Event = Event };
         PzaUi.Add(Window);
     }
 

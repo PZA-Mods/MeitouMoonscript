@@ -336,6 +336,48 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                         }
                         break;
                     }
+                    case "medical.amputate":
+                    {
+                        var cid = new CharacterId(act.TargetSlot, act.TargetGen);
+                        if (world.Characters.TryResolveNext(cid, out int slot)
+                            && world.Characters.Cold(slot)?.Medical is { } med)
+                        {
+                            string want = act.Amount switch { 0 => "left arm", 1 => "right arm", 2 => "left leg", 3 => "right leg", _ => "" };
+                            foreach (var pt in med.Parts)
+                            {
+                                string pid = pt.Template?.StringId ?? "";
+                                if (want.Length > 0 && pid.Contains(want, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    pt.Limb = Meitou.Simulation.Bodies.LimbState.Stump;
+                                    pt.Flesh = Math.Min(pt.Flesh, -pt.MaxHp);
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    case "medical.set_blood":
+                    {
+                        var cid = new CharacterId(act.TargetSlot, act.TargetGen);
+                        if (world.Characters.TryResolveNext(cid, out int slot)
+                            && world.Characters.Cold(slot)?.Medical is { } med
+                            && double.IsFinite(act.X))
+                        {
+                            med.Blood = (float)Math.Clamp(act.X, -200, 200);
+                        }
+                        break;
+                    }
+                    case "medical.add_fed":
+                    {
+                        var cid = new CharacterId(act.TargetSlot, act.TargetGen);
+                        if (world.Characters.TryResolveNext(cid, out int slot)
+                            && world.Characters.Cold(slot)?.Medical is { } med
+                            && double.IsFinite(act.X))
+                        {
+                            med.Fed = Math.Clamp(med.Fed + (float)Math.Clamp(act.X, -10, 10), 0, 100);
+                        }
+                        break;
+                    }
                 }
             }
             catch (Exception) { }
@@ -436,7 +478,10 @@ public sealed class WorldSnapshot : ITickSystem, ICombatHitObserver
                     hot.Position.X, hot.Position.Y, hot.Position.Z,
                     hot.Health, down, dead, cold.InCombat, cold.SquadId,
                     parts, tough, blood, 100, uncon, rel, isEnemy, isAlly,
-                    TemplateId: cold.RecordId ?? ""));
+                    TemplateId: cold.RecordId ?? "",
+                    IsAnimal: cold.Animal is not null,
+                    Age: float.IsFinite(cold.Age) ? cold.Age : 1.0,
+                    RaceId: cold.Race?.Name ?? ""));
                 if (cold.IsPlayer && cold.Inventory is { } inv && inv.Items.Count > 0)
                 {
                     int n = Math.Min(inv.Items.Count, 32);

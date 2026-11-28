@@ -24,6 +24,9 @@ unpack = unpack or table.unpack
 bit = bit or bit32
 os = os or {}
 os.clock = function() return __kl_clock() end
+os.date = function(fmt) return __kl_date(fmt) end
+os.time = function() return math.floor(__kl_unix_time()) end
+os.execute = function() return nil, "sandbox", 1 end
 io = io or {}
 io.open = function(path, mode)
   if mode ~= nil and mode ~= "r" and mode ~= "rb" then return nil, "read-only" end
@@ -77,6 +80,42 @@ SpecialTypes = SpecialTypes or {
   GATE = 1,
   DOOR = 2,
   WALL = 3,
+  HOUSE = 4,
+}
+
+RobotLimbs = RobotLimbs or {
+  LEFT_ARM = 0,
+  RIGHT_ARM = 1,
+  LEFT_LEG = 2,
+  RIGHT_LEG = 3,
+}
+
+LimbState = LimbState or {
+  LIMB_ORIGINAL = 0,
+  LIMB_STUMP = 1,
+  LIMB_CRUSHED = 2,
+  LIMB_REPLACED = 3,
+}
+
+WaterState = WaterState or {
+  NO_WATER = 0,
+  SHALLOW = 1,
+  DEEP = 2,
+}
+
+GroundType = GroundType or {
+  SAND = 0,
+  GRASS = 1,
+  MUD = 2,
+  DIRT = 3,
+  ROCK = 4,
+}
+
+BuildingClassType = BuildingClassType or {
+  NORMAL = 0,
+  FARM = 1,
+  WALL = 2,
+  GATE = 3,
   HOUSE = 4,
 }
 
@@ -145,11 +184,63 @@ local BodyPartMT = {
 
 local HandleMT = {
   __index = {
-    toString = function(self) return tostring(self.slot) .. ":" .. tostring(self.gen) end,
+    isValid = function(self)
+      if self.building then return #tostring(self.building) > 0 end
+      return (self.slot or 0) > 0 or (self.gen or 0) > 0
+    end,
+    toString = function(self)
+      if self.building then return tostring(self.building) end
+      return tostring(self.slot) .. ":" .. tostring(self.gen)
+    end,
     getCharacter = function(self)
       local c = __kl_char_by_id(self.slot, self.gen)
       return c and __kl_wrap_char(c) or nil
     end,
+    getBuilding = function(self)
+      if not self.building then return nil end
+      local b = __kl_building_by_id(self.building)
+      return b and __kl_wrap_building(b) or nil
+    end,
+  }
+}
+
+function getGlobalConstants()
+  return { MAX_SQUAD_SIZE = 20, MAX_FACTION_SIZE = 30 }
+end
+
+function getRootObjectFactory()
+  return {
+    create = function(_, data, pos) return { handle = setmetatable({ slot = 0, gen = 0 }, HandleMT), data = data, pos = pos } end,
+    createRandomCharacter = function() return nil end,
+  }
+end
+
+local FactionMT = {
+  __index = {
+    isThePlayer = function(self) return self.is_player == true end,
+    getId       = function(self) return self.id or -1 end,
+    isEnemy     = function(self, other)
+      local oid = type(other) == "table" and other.id or other
+      return __kl_faction_relation(oid) <= -30
+    end,
+  }
+}
+
+local function __kl_make_faction(id, isPlayer)
+  return setmetatable({
+    id = id or -1,
+    is_player = isPlayer == true,
+    relations = {
+      isAlly = function(_, f) return __kl_faction_is_ally(type(f) == "table" and f.id or f) end,
+      getFactionRelation = function(_, f) return __kl_faction_relation(type(f) == "table" and f.id or f) end,
+    }
+  }, FactionMT)
+end
+
+local ItemMT = {
+  __index = {
+    getModelName = function(self) return self.name or self.record or "" end,
+    getName      = function(self) return self.name or self.record or "" end,
   }
 }
 
@@ -157,18 +248,46 @@ local CharMethods = {
   getName            = function(self) return self.name end,
   getPos             = function(self) return { x = self.x, y = self.y, z = self.z } end,
   getPosition        = function(self) return { x = self.x, y = self.y, z = self.z } end,
-  getFaction         = function(self) return self.faction end,
+  getFaction         = function(self) return __kl_make_faction(self.faction, self.is_player) end,
   isPlayerCharacter  = function(self) return self.is_player == true end,
   isUnconscious      = function(self) return self.unconcious == true or self.down == true end,
+  isUnconcious       = function(self) return self.unconcious == true or self.down == true end,
+  isLiterallyUnconciousNotPretending = function(self) return self.unconcious == true or self.down == true end,
   isDead             = function(self) return self.dead == true end,
+  isCrippled         = function(self) return false end,
+  isFleeing          = function(self) return false end,
+  isAnimal           = function(self)
+    if self.is_animal == true then return { age = self.age or 1.0 } end
+    return false
+  end,
+  isEnemy            = function(self, other)
+    if self.is_enemy == true then return true end
+    if type(other) == "table" and other.is_player == true then return self.is_enemy == true end
+    return false
+  end,
   inCombat           = function(self) return self.in_combat == true end,
   isIndoors          = function(self) return false end,
   isUnique           = function(self) return false end,
   isATrader          = function(self) return self.is_trader == true end,
   getHealth          = function(self) return self.hp or 0 end,
   getSquadId         = function(self) return self.squad_id or -1 end,
-  getInventory       = function(self) return __kl_char_items(self.slot, self.gen) end,
+  getWaterLevel      = function(self) return 0 end,
+  getOrientation     = function(self) return { w = 1, x = 0, y = 0, z = 0 } end,
+  getGameData        = function(self) return { id = self.template_id or self.name, stringID = self.template_id or "", name = self.name } end,
+  getCharBody        = function(self) return { getPosition = function() return self:getPosition() end } end,
+  getPlatoon         = function(self) return { getSquadSize = function() return 1 end, getCharactersInArea = function() return {} end } end,
+  getAppearance      = function(self)
+    if not self._appearance then self._appearance = { appearanceData = { fdata = {} } } end
+    return self._appearance
+  end,
+  getInventory       = function(self)
+    local raw = __kl_char_items(self.slot, self.gen)
+    for i = 1, #raw do setmetatable(raw[i], ItemMT) end
+    raw.getAllItems = function() return raw end
+    return raw
+  end,
   getMedical         = function(self) return self.medical end,
+  say                = function(self, msg) return __kl_floater(self.x, self.y + 18, self.z, tostring(msg or "")) end,
   giveItem           = function(self, rec, count)
     local id = type(rec) == "table" and (rec.id or rec.name) or rec
     return __kl_item_give(self.slot, self.gen, tostring(id or ""), count or 1)
@@ -193,16 +312,43 @@ local CharMT = {
       local anat = {}
       for i = 1, #rawParts do anat[i] = setmetatable(rawParts[i], BodyPartMT) end
       local maxB = rawget(self, "max_blood") or 100
-      local med = {
+      local medStore = {
         anatomy = anat,
         unconcious = rawget(self, "unconcious") == true or rawget(self, "down") == true,
         dead = rawget(self, "dead") == true,
         blood = rawget(self, "blood") or maxB,
+        hunger = 3.0,
+        fed = 0.0,
         stats = { _toughness = rawget(self, "toughness") or 1, ageMult = 1 },
         getMaxBlood = function() return maxB end,
+        getPartCount = function() return #anat end,
+        amputate = function(_, limbEnum)
+          return __kl_med_amputate(self.slot, self.gen, tonumber(limbEnum) or 0)
+        end,
       }
+      local med = setmetatable({}, {
+        __index = medStore,
+        __newindex = function(_, mk, mv)
+          if mk == "blood" and type(mv) == "number" then
+            medStore.blood = mv
+            __kl_med_set_blood(self.slot, self.gen, mv)
+          elseif mk == "fed" and type(mv) == "number" then
+            local delta = mv - (medStore.fed or 0)
+            medStore.fed = mv
+            __kl_med_add_fed(self.slot, self.gen, delta)
+          else
+            medStore[mk] = mv
+          end
+        end
+      })
       rawset(self, "medical", med)
       return med
+    end
+    if k == "myRace" then
+      return { data = { name = rawget(self, "race_id") or "" } }
+    end
+    if k == "movement" then
+      return { isIdle = function() return rawget(self, "in_combat") ~= true end, isStandingOnSomething = function() return nil end }
     end
     if k == "crimes" then
       local b = rawget(self, "bounty") or 0
@@ -245,25 +391,40 @@ function __kl_make_gamedata(rawJson)
   return setmetatable({ _d = d }, GameDataMT)
 end
 
+local BuildingMethods = {
+  getId                        = function(self) return self.building or self.id end,
+  getName                      = function(self) return self.name or self.building or self.id end,
+  getPos                       = function(self) return { x = self.x, y = self.y, z = self.z } end,
+  getPosition                  = function(self) return { x = self.x, y = self.y, z = self.z } end,
+  getDoorPosition              = function(self) return { x = self.x, y = self.y, z = self.z } end,
+  getDoor                      = function(self) return self end,
+  getBuildState_ActualNonShared = function(self) return { isComplete = true } end,
+  getGameData                  = function(self) return { id = self.building or self.id, stringID = self.building or self.id, name = self.name or self.building or self.id, type = itemType.BUILDING } end,
+  getFaction                   = function(self) return __kl_make_faction(self.owner or -1, self.is_player) end,
+  isPlayer                     = function(self) return self.is_player == true end,
+  isGate                       = function(self) return self.is_gate == true end,
+  isOpen                       = function(self) return (self.open_amount or 0) > 0.5 or self.motion == "open" or self.motion == "opening" end,
+  isLocked                     = function(self) return self.locked == true end,
+  isBroken                     = function(self) return self.broken == true end,
+  openDoor                     = function(self) return __kl_door_open(self.building or self.id, true) end,
+  closeDoor                    = function(self) return __kl_door_open(self.building or self.id, false) end,
+  setOpen                      = function(self, v) return __kl_door_open(self.building or self.id, v == true) end,
+  setLocked                    = function(self, v) return __kl_door_lock(self.building or self.id, v == true) end,
+  lockDoor                     = function(self) return __kl_door_lock(self.building or self.id, true) end,
+  unlockDoor                   = function(self) return __kl_door_lock(self.building or self.id, false) end,
+}
+
 local BuildingMT = {
-  __index = {
-    getId        = function(self) return self.building or self.id end,
-    getName      = function(self) return self.name or self.building or self.id end,
-    getPos       = function(self) return { x = self.x, y = self.y, z = self.z } end,
-    getPosition  = function(self) return { x = self.x, y = self.y, z = self.z } end,
-    getFaction   = function(self) return self.owner or -1 end,
-    isPlayer     = function(self) return self.is_player == true end,
-    isGate       = function(self) return self.is_gate == true end,
-    isOpen       = function(self) return (self.open_amount or 0) > 0.5 or self.motion == "open" or self.motion == "opening" end,
-    isLocked     = function(self) return self.locked == true end,
-    isBroken     = function(self) return self.broken == true end,
-    openDoor     = function(self) return __kl_door_open(self.building or self.id, true) end,
-    closeDoor    = function(self) return __kl_door_open(self.building or self.id, false) end,
-    setOpen      = function(self, v) return __kl_door_open(self.building or self.id, v == true) end,
-    setLocked    = function(self, v) return __kl_door_lock(self.building or self.id, v == true) end,
-    lockDoor     = function(self) return __kl_door_lock(self.building or self.id, true) end,
-    unlockDoor   = function(self) return __kl_door_lock(self.building or self.id, false) end,
-  }
+  __index = function(self, k)
+    local m = BuildingMethods[k]
+    if m ~= nil then return m end
+    if k == "handle" then
+      local h = setmetatable({ building = self.building or self.id }, HandleMT)
+      rawset(self, "handle", h)
+      return h
+    end
+    return nil
+  end
 }
 
 function __kl_wrap_building(b) return b and setmetatable(b, BuildingMT) or nil end
@@ -293,14 +454,19 @@ local PlayerInterfaceMT = {
     if k == "selected" then return __kl_selected_name() end
     if k == "camera" then return getGameWorld():getCamera() end
     if k == "getCamera" then return function() return getGameWorld():getCamera() end end
+    if k == "getCharacterEditMode" then return function() return false end end
     if k == "isEnemy" then return function(_, c) return type(c) == "table" and c.is_enemy == true end end
     if k == "playerCharacters" then
       local list = getGameWorld():getCharacterUpdateList()
       local out = {}
       for i = 1, #list do if list[i].is_player == true then out[#out + 1] = list[i] end end
+      function out:size() return #self end
       return out
     end
-    if k == "selectedObject" then
+    if k == "getAllPlayerCharacters" then
+      return function() return self.playerCharacters end
+    end
+    if k == "selectedObject" or k == "selectedCharacter" then
       local sel = __kl_selected_name()
       if not sel then return nil end
       local list = getGameWorld():getCharacterUpdateList()
@@ -318,14 +484,7 @@ local PlayerInterfaceMT = {
       end
     end
     if k == "getFaction" then
-      return function()
-        return {
-          relations = {
-            isAlly = function(_, f) return __kl_faction_is_ally(f) end,
-            getFactionRelation = function(_, f) return __kl_faction_relation(f) end,
-          }
-        }
-      end
+      return function() return __kl_make_faction(1, true) end
     end
     return nil
   end
@@ -362,7 +521,8 @@ local GameWorldMT = {
       return {
         getZone = function(_, x, z)
           return { x = math.floor((x or 0) / 768), z = math.floor((z or 0) / 768) }
-        end
+        end,
+        getGroundType = function(_, _) return GroundType.DIRT end,
       }
     end
     if k == "getTimeStamp_inGameHours" then
@@ -414,6 +574,28 @@ local GameWorldMT = {
     end
     if k == "isPaused" then return function() return false end end
     if k == "userPause" then return function() return false end end
+    if k == "getFrameSpeedMultiplier" then return function() return 1.0 end end
+    if k == "getAllPlayerCharacters" then return function() return __kl_player_singleton.playerCharacters end end
+    if k == "getCharactersInArea" then
+      return function(_, pos, radius) return self:getObjectsWithinSphere(pos, radius, itemType.CHARACTER) end
+    end
+    if k == "getNearestActiveCharacter" then
+      return function(_, pos)
+        local cx, cz = (pos and pos.x) or 0, (pos and (pos.z or pos.y)) or 0
+        local raw = __kl_chars()
+        local best, bestD = nil, math.huge
+        for i = 1, #raw do
+          local c = raw[i]
+          local dx, dz = c.x - cx, c.z - cz
+          local d = dx * dx + dz * dz
+          if d < bestD then best, bestD = c, d end
+        end
+        return best and setmetatable(best, CharMT) or nil
+      end
+    end
+    if k == "showPlayerAMessage" then
+      return function(_, msg) KenshiLua.log(tostring(msg or "")) end
+    end
     return nil
   end
 }
@@ -425,6 +607,7 @@ SaveManager = {
   getSingleton = function()
     return {
       isLoading = function() return false end,
+      isLoadingFromASaveGame = function() return false end,
       getCurrentSaveName = function() return "meitou" end,
     }
   end
@@ -443,6 +626,7 @@ SaveManager = {
         t["toughness"] = c.Toughness; t["blood"] = c.Blood; t["max_blood"] = c.MaxBlood;
         t["relation"] = c.Relation; t["is_enemy"] = c.IsEnemy; t["is_ally"] = c.IsAlly;
         t["is_trader"] = c.IsTrader; t["bounty"] = c.Bounty; t["template_id"] = c.TemplateId;
+        t["is_animal"] = c.IsAnimal; t["age"] = c.Age; t["race_id"] = c.RaceId;
         var parts = new Table(s);
         if (c.Parts is { Count: > 0 } pl)
         {
@@ -491,14 +675,30 @@ SaveManager = {
             output($"[KL:{modId}] {msg}", Ink.Dim);
             return DynValue.Nil;
         });
-        box.RawScript.Globals.Get("KenshiLua").Table["version"] = "0.8.0-meitou";
+        box.RawScript.Globals.Get("KenshiLua").Table["version"] = "0.11.0-meitou";
         box.RawScript.Globals.Get("KenshiLua").Table["isMeitou"] = true;
 
         box.Expose("", "__kl_clock", _ => DynValue.NewNumber(s_clock.Elapsed.TotalSeconds));
+        box.Expose("", "__kl_unix_time", _ => DynValue.NewNumber(DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+        box.Expose("", "__kl_date", a =>
+        {
+            string fmt = a.Count > 0 && a[0].Type == DataType.String ? a[0].String : "%Y-%m-%d %H:%M:%S";
+            var now = DateTime.Now;
+            string s = fmt
+                .Replace("%Y", now.ToString("yyyy"))
+                .Replace("%m", now.ToString("MM"))
+                .Replace("%d", now.ToString("dd"))
+                .Replace("%H", now.ToString("HH"))
+                .Replace("%M", now.ToString("mm"))
+                .Replace("%S", now.ToString("ss"));
+            return DynValue.NewString(s);
+        });
         box.Expose("", "__kl_read_mod_file", a =>
         {
             if (string.IsNullOrEmpty(modFolder) || a.Count < 1 || a[0].Type != DataType.String) return DynValue.Nil;
             string req = a[0].String.Trim().Replace('\\', '/');
+            string normRoot = modFolder.TrimEnd('\\', '/').Replace('\\', '/') + "/";
+            if (req.StartsWith(normRoot, StringComparison.OrdinalIgnoreCase)) req = req[normRoot.Length..];
             // Allow only simple filenames or relative paths that stay inside this mod's folder
             string leaf = Path.GetFileName(req);
             string? full = HostedScript.SafePath(modFolder, req) ?? (!string.IsNullOrEmpty(leaf) ? HostedScript.SafePath(modFolder, leaf) : null);
@@ -522,7 +722,15 @@ SaveManager = {
         {
             var t = new Table(box.RawScript);
             var mods = activeMods();
-            for (int i = 0; i < mods.Count; i++) t[i + 1] = mods[i];
+            for (int i = 0; i < mods.Count; i++)
+            {
+                var entry = new Table(box.RawScript);
+                entry["name"] = mods[i];
+                entry["path"] = string.Equals(mods[i], modId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(modFolder)
+                    ? modFolder.Replace('\\', '/') + "/"
+                    : "mods/" + mods[i] + "/";
+                t[i + 1] = entry;
+            }
             return DynValue.NewTable(t);
         });
         box.Expose("", "__kl_chars", _ =>
@@ -562,6 +770,33 @@ SaveManager = {
             for (int i = 0; i < snap.Characters.Count; i++)
                 if (snap.Characters[i].Faction == f) return DynValue.NewNumber(snap.Characters[i].Relation);
             return DynValue.NewNumber(0);
+        });
+        box.Expose("", "__kl_building_by_id", a =>
+        {
+            if (a.Count < 1 || a[0].Type != DataType.String) return DynValue.Nil;
+            string bid = a[0].String;
+            var snap = scan();
+            for (int i = 0; i < snap.Doors.Count; i++)
+            {
+                var d = snap.Doors[i];
+                if (string.Equals(d.Building, bid, StringComparison.OrdinalIgnoreCase) || string.Equals(d.Id, bid, StringComparison.OrdinalIgnoreCase))
+                {
+                    var t = new Table(box.RawScript);
+                    t["id"] = d.Id; t["building"] = d.Building; t["name"] = d.Building;
+                    t["owner"] = d.Owner; t["is_player"] = d.IsPlayer;
+                    t["x"] = d.X; t["y"] = d.Y; t["z"] = d.Z;
+                    t["open_amount"] = d.OpenAmount; t["motion"] = d.Motion;
+                    t["locked"] = d.Locked; t["broken"] = d.Broken; t["is_gate"] = d.IsGate;
+                    return DynValue.NewTable(t);
+                }
+            }
+            return DynValue.Nil;
+        });
+        box.Expose("", "__kl_floater", a =>
+        {
+            if (a.Count < 4 || !trySpendAction()) return DynValue.False;
+            enqueueAction(new WorldAction("world.floater", X: a[0].Number, Y: a[1].Number, Z: a[2].Number, Text: a[3].CastToString() ?? ""));
+            return DynValue.True;
         });
         box.Expose("", "__kl_doors", _ =>
         {
@@ -650,6 +885,24 @@ SaveManager = {
                 return DynValue.False;
             int cnt = a.Count >= 4 && a[3].Type == DataType.Number ? (int)Math.Clamp(a[3].Number, 1, 20) : 1;
             enqueueAction(new WorldAction("item.give", TargetId: a[2].String.Trim(), TargetSlot: (int)a[0].Number, TargetGen: (int)a[1].Number, Amount: cnt));
+            return DynValue.True;
+        });
+        box.Expose("", "__kl_med_amputate", a =>
+        {
+            if (a.Count < 3 || !trySpendAction()) return DynValue.False;
+            enqueueAction(new WorldAction("medical.amputate", TargetSlot: (int)a[0].Number, TargetGen: (int)a[1].Number, Amount: (int)a[2].Number));
+            return DynValue.True;
+        });
+        box.Expose("", "__kl_med_set_blood", a =>
+        {
+            if (a.Count < 3 || !trySpendAction()) return DynValue.False;
+            enqueueAction(new WorldAction("medical.set_blood", TargetSlot: (int)a[0].Number, TargetGen: (int)a[1].Number, X: a[2].Number));
+            return DynValue.True;
+        });
+        box.Expose("", "__kl_med_add_fed", a =>
+        {
+            if (a.Count < 3 || !trySpendAction()) return DynValue.False;
+            enqueueAction(new WorldAction("medical.add_fed", TargetSlot: (int)a[0].Number, TargetGen: (int)a[1].Number, X: a[2].Number));
             return DynValue.True;
         });
         box.Expose("", "__kl_item_remove", a =>

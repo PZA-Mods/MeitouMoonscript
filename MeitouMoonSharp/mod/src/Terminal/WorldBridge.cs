@@ -8,7 +8,8 @@ public sealed record CharSnap(int Slot, int Gen, string Name, int Faction, bool 
                               double X, double Y, double Z, double Hp, bool Down, bool Dead, bool InCombat, int SquadId,
                               IReadOnlyList<BodyPartSnap>? Parts = null, double Toughness = 1, double Blood = 100,
                               double MaxBlood = 100, bool Unconscious = false, int Relation = 0, bool IsEnemy = false,
-                              bool IsAlly = false, bool IsTrader = false, int Bounty = 0, string TemplateId = "");
+                              bool IsAlly = false, bool IsTrader = false, int Bounty = 0, string TemplateId = "",
+                              bool IsAnimal = false, double Age = 1.0, string RaceId = "");
 
 public sealed record DoorSnap(string Id, string Building, int Owner, bool IsPlayer,
                               double X, double Y, double Z, double OpenAmount, string Motion, bool Locked, bool Broken, bool IsGate);

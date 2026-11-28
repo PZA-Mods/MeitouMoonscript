@@ -1,4 +1,9 @@
-# KenshiLua Compatibility Layer (Milestone 3 — `0.7.3`)
+# KenshiLua Compatibility Layer (Milestone 6 — `0.10.0`; retired on Meitou 0.24.0+ since `0.12.0`)
+
+> **Retired on Meitou 0.24.0 and later.** Meitou now runs KenshiLua mods itself: Meitou.Lua, from PZA's
+> [VlcekM/MeitouClient#1494](https://github.com/VlcekM/MeitouClient/pull/1494) and [#1537](https://github.com/VlcekM/MeitouClient/pull/1537).
+> There this layer never starts (`/kl` only lists and stops). It stays, frozen, for Meitou 0.20.1 to 0.23.x; no new work goes into it.
+> Since 0.12.0 its save bag is kept per save (shared pack store, key `kl:<mod>`), refreshed once a game hour and on stop.
 
 Author: **PZA** | Licence: **GPLv3 or later** | Module: `mod/src/KenshiLua/`
 
@@ -31,7 +36,7 @@ Disabled/unlisted mods stay stopped until manually started via the console:
 | **Event Registration** | Implemented | `registerHandler(ev, fn)`, `unregisterHandler(id)`, `Events.on/off`. Dispatches `MyGUI::Gui::eventFrameStart`, `onCharsUpdate`, `onCombatHit`, `onCharacterDown`, `onHour`, `onDay`, `onBuildingLoaded`, `onCharacterSelect`, `onKeyDown`, `onPlayerSerialise`, `onPlayerLoadFromSerialise`. |
 | **`getGameWorld()` & `getPlayerInterface()`** | Implemented | `activeMods`, `player` / `getPlayerInterface()` (`getCamera()`, `isEnemy(c)`, `getFaction().relations`, `getSelectedCharacters()`), `gamedata:getDataByName()`, `zoneMgr:getZone()`, `getTimeStamp_inGameHours()`, `getCharacterUpdateList()`, `getBuildings()` / `getDoors()`, `getObjectsWithinSphere()`, `getCamera()`. |
 | **`Character`, `Handle`, `Medical`, `lektor`** | Implemented | `c.handle` (`toString()`, `getCharacter()`), `lektor.new("hand")`, `c.medical` / `getMedical()` (`anatomy` per-part `flesh`/`fleshStun`/`maxHealth()`/`fatal`, `blood`, `getMaxBlood()`, `stats._toughness`, `unconcious`, `dead`), `crimes:getTotalBounty()`, `isATrader()`, `isIndoors()`, `isUnique()`, `getInventory()`, `giveItem()`, `removeItem()`. |
-| **`GameData` Save Bag** | Implemented | `onPlayerSerialise(player, gameData)` / `onPlayerLoadFromSerialise(player, gameData)` with `:getString/:setString/:getNumber/:setNumber/:getBool/:setBool`, persisted to `pack_states/kl_<mod>.json` (256 KB cap). |
+| **`GameData` Save Bag** | Implemented | `onPlayerSerialise(player, gameData)` / `onPlayerLoadFromSerialise(player, gameData)` with `:getString/:setString/:getNumber/:setNumber/:getBool/:setBool`, kept per save in the save's Moonscript data (key `kl:<mod>`, 256 KB cap; per install in `pack_states/` before 0.12.0). |
 | **`Building` / Gate Proxy** | Implemented | `getId()`, `getName()`, `getPos()`, `getFaction()`, `isPlayer()`, `isGate()`, `isOpen()`, `isLocked()`, `isBroken()`, `openDoor()`, `closeDoor()`, `setOpen()`, `setLocked()`, `lockDoor()`, `unlockDoor()`. |
 | **`Camera` Proxy** | Implemented | `getPosition()`, `getCameraPos()`, `getCenter()`, `getForward()`, `getFacingDirection()`, `isVisible(pos)`, `getYaw()`, `getPitch()`, `getFov()`, `project(x, y, z)`. |
 | **`MyGUI.*` Shim** | Implemented | `getViewSize()`, `RenderManager.getInstance():getViewSize()`, `Align`, `Colour.new(r,g,b,a)` / `Colour(r,g,b,a)`, `createWindow`, `createWidget`, `createTextBox`, `createButton`, `createImageBox` (real `ImageBox` atlas `setImageTexture` + `setImageCoord` + `setColour` + `setAlpha`), `createEditBox`, `:setCaption`, `:setCoord`, `:setVisible`, `:setTextColour`, `:setTextAlign`, `:getTextSize()`, `:destroy`, `:registerCallback`. |
@@ -40,13 +45,19 @@ Disabled/unlisted mods stay stopped until manually started via the console:
 
 ---
 
-## Verified Real Workshop Mods
+## Verified Real Workshop Mods (6/6 Pure-Lua Mods)
 
 - **POSH Damage Numbers** (`3821781631`) — loads unmodified, runs `MyGUI::Gui::eventFrameStart` with pure-Lua fallback projection (`"fb"`), renders floating glyph sprites from `DamageNumbers_atlas.png` on body-part damage.
-- **POSH Nameplates** (`3822135808`) — loads unmodified, renders WoW-style health/blood bars and icons from `Nameplates_atlas.png` plus character names.
+- **POSH Nameplates** (`3822135808`) — loads unmodified, renders WoW-style health/blood bars and icons from `Nameplates_atlas.png` plus character names with live `FactionRelations`.
+- **SimpleCompass** (`3776333893`) — loads unmodified, reads `activeMods` path + config JSON, animates sprite-sheet layers via `setImageInfo`/`setImageIndex`.
+- **automatic-gates** (`3806949810`) — loads unmodified, tracks player gates via `onBuildingLoaded` + `building:getDoor()` / `getDoorPosition()` / `Faction:isThePlayer()`, and persists gate settings via `onPlayerSerialise` / `onPlayerLoadFromSerialise`.
+- **AmputateLimbs** (`3776673278`) — loads unmodified, passes full `RobotLimbs`/`LimbState` environment precheck, registers dialogue conversation handlers cleanly.
+- **HappyHerders** (`3801933905`) — loads unmodified, inverts `WaterState`/`GroundType`/`BuildingClassType` enums, runs `onCharsUpdate`/`onCharacterSelect`/`onKeyDown` cleanly.
 
 ---
 
-## Next Milestone (Upstream Meitou Integration)
+## Upstream Meitou PR Readiness (Remaining Direct-Engine Bindings)
 
-- Direct Meitou upstream PR integration: first-class `GameWorld` pause/speed/spawn/dialogue bindings (`DialogueScriptingBridge` / `WorldStateScriptingBridge`), native `onKeyDown` hook from Meitou's input router, and optional LuaJIT/5.1 compat discussion with upstream maintainers.
+Moving `mod/src/KenshiLua/` into `MeitouClient` itself unlocks the remaining direct-engine bindings that a code mod cannot access through `SlowWorld` snapshots:
+- Direct `GameDatabase` (`world.gamedata:getDataByName`), real `MyGuiScreenHost` nested widget trees & `.layout` loading, direct camera view/projection matrices, real `onDialogueStartConversation` / `amputate` / `createRandomCharacter` / `getGroundType` simulation calls, and native save-file integration for `onPlayerSerialise` / `onPlayerLoadFromSerialise`.
+- Permanently out of scope on Meitou: LuaJIT `ffi` calls into `kenshi_x64.exe` / `OgreMain_x64.dll` and native C++ RE_Kenshi `.dll` plugins (Meitou is a pure C# engine rewrite).

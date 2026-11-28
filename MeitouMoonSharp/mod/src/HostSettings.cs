@@ -34,6 +34,6 @@ public sealed class HostSettings
     [Setting("Auto-start third-party packs", Hint = "Automatically start Lua packs found in other mods' moonscript/ folders. Off: start them yourself with /start <pack>.")]
     public bool AutoStartThirdPartyPacks { get; set; } = false;
 
-    [Setting("Auto-start KenshiLua mods", Hint = "Automatically start KenshiLua mods enabled in data/mods.cfg. Off: start them yourself with /kl allow and /kl start.")]
+    [Setting("Auto-start KenshiLua mods", Hint = "Meitou before 0.24.0 only: start KenshiLua mods enabled in data/mods.cfg. Meitou 0.24.0 and later run them itself, so this layer stays off there.")]
     public bool AutoStartKenshiLua { get; set; } = true;
 }

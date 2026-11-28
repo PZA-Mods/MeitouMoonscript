@@ -46,7 +46,8 @@ MeitouMoonscript automatically discovers every `pack.json` under `<mods>/<AnyMod
 - `entry`: relative path to your Lua file inside the pack folder (path traversal `..` and symlinks/junctions are rejected).
 - `permissions`: optional array of capabilities the pack requests (defaults to `["commands", "timers", "world.read"]`):
   - `"commands"` — `command(name, fn)`
-  - `"timers"` — `after(hours, fn)` and `every(hours, fn)`
+  - `"timers"` — `after(hours, fn)`, `every(hours, fn)` and `after_saved(hours, "fn", data)` (up to 64 timers and 32 `on` handlers per pack)
+  - `"timers.many"` — raises those caps to 1024 timers and 256 handlers (for packs that really need them; third-party packs need `/allow`)
   - `"events"` — `on(event, fn)`
   - `"world.read"` — `world.hour()`, `world.day()`, `world.cats()`, `world.squad()`, `selected.name()`
   - `"world.scan"` — spatial & outpost sensors: `world.characters([x, z, radius, filter])`, `world.doors([onlyPlayer])`, `world.buildings([onlyPlayer])`
@@ -83,6 +84,14 @@ Every pack receives these built-in functions and globals:
 | `command(name, fn)` | Register a terminal slash command `/<name>`. `fn(args)` receives the trimmed argument string. |
 | `after(hours, fn)` | Schedule `fn()` once after `hours` of in-game clock time (deterministic, pauses when the game pauses). |
 | `every(hours, fn)` | Schedule `fn()` repeatedly every `hours` of in-game clock time. |
+| `after_saved(hours, "fn", data)` | A one-shot timer that **survives a save**: it is kept as plain data in `state.__timers` and, with `pack.save`, comes back after a load. When due, the host calls the global function `fn(data)` once. `data` must be plain data. A missing function is dropped with one log line. Returns a number, or `nil, reason` at the cap. |
+
+`after` and `every` hold a Lua function, so they last only until the pack stops or the game closes; re-arm them when your pack starts.
+Use `after_saved` for anything that must happen even if the player saves and reloads in between (a debt due in 3 days, a caravan arriving).
+
+**Caps.** A pack holds at most 64 timers (`after` + `every` + `after_saved`) and 32 `on` handlers; `timers.many` raises that to 1024 / 256.
+Past the cap, `after` / `every` / `after_saved` / `on` return `nil, reason` and nothing changes: the pack keeps running, so check the answer
+(`local id, why = after(1, f) if not id then print(why) end`). The caps keep one pack from slowing every frame by piling up timers.
 | `on(event, fn)` | Subscribe to an allow-listed game event. |
 
 #### Allow-Listed Game Events (`on(event, fn)`)
@@ -135,7 +144,7 @@ All actuators enqueue onto Meitou's deterministic `World.Commands` queue on the 
 
 | Function | Effect |
 | :--- | :--- |
-| `pack.save()` | Immediately persists the pack's plain-data `state` table (up to 256 KB). Also auto-saved on `/stop` and auto-restored on `/start`. |
+| `pack.save()` | Keeps the pack's plain-data `state` table (up to 256 KB) for the current save. Also kept on `/stop` and restored on `/start`. **Per save (0.12.0):** the game's save writes the state each pack last kept into that save; a load restores that save's state, a new game starts with none. Call `pack.save()` after a change you want the next game save to hold. |
 
 ### Camera Sensors (`"camera.read"`) & HUD Overlays (`"ui.hud"`)
 

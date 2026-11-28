@@ -30,11 +30,16 @@ public sealed class PackHost
     public const int MaxActionsPerTick = 16;
     public const int MaxPackSaveBytes = 256 * 1024;
 
+    /// <summary>Claim T1 (tools/euler/CLAIMS.md): per pack, timers (after / every / after_saved together) and on() handlers. A pack
+    /// that holds `timers.many` (asked for in pack.json, granted with /allow) gets the larger caps. Past a cap a registration returns
+    /// nil and a reason; the pack keeps running.</summary>
+    public const int MaxTimers = 64, MaxHandlers = 32, ManyTimers = 1024, ManyHandlers = 256;
+
     public static readonly IReadOnlyList<string> DefaultPermissions = ["commands", "timers", "world.read"];
 
     public static readonly HashSet<string> SafePermissions = new(StringComparer.OrdinalIgnoreCase)
     {
-        "commands", "timers", "events", "world.read", "world.scan", "world.control", "world.items", "pack.save", "camera.read", "ui.hud",
+        "commands", "timers", "timers.many", "events", "world.read", "world.scan", "world.control", "world.items", "pack.save", "camera.read", "ui.hud",
     };
 
     readonly Dictionary<string, (string Owner, IReadOnlyList<HostFunction> Functions)> _extensions = new(StringComparer.OrdinalIgnoreCase);
@@ -67,7 +72,7 @@ public sealed class PackHost
     readonly string? _modsRoot;
     readonly string? _selfModFolderName;
     readonly string? _grantsPath;
-    readonly string? _stateDir;
+    readonly PackStore? _store;
     readonly Func<double?> _hours;
     readonly Func<string?> _selected;
     readonly Func<IReadOnlyList<FighterSnap>> _squad;
@@ -106,6 +111,7 @@ public sealed class PackHost
         public string? Error;
         public int ActionsThisTick;
         public bool CanSave;
+        public bool ManyTimers;   // holds `timers.many`: the larger caps (T1)
         public bool SaveRequested;
         public List<string> Commands { get; } = [];
         public List<TimerEntry> Timers { get; } = [];
@@ -116,12 +122,12 @@ public sealed class PackHost
     public PackHost(string packsDir, Func<double?> hours, Func<string?> selected, Func<IReadOnlyList<FighterSnap>> squad,
                     Func<long?> cats, Func<ScriptLimits> limits, Action<string, Ink> output, Action<string> log,
                     string? modsRoot = null, string? selfModFolderName = null, string? grantsPath = null,
-                    Func<WorldScanSnapshot>? scan = null, Action<WorldAction>? enqueueAction = null, string? stateDir = null,
+                    Func<WorldScanSnapshot>? scan = null, Action<WorldAction>? enqueueAction = null, PackStore? store = null,
                     Func<CameraSnap?>? camera = null, HudState? hud = null)
     {
         _packsDir = packsDir; _modsRoot = modsRoot; _selfModFolderName = selfModFolderName; _grantsPath = grantsPath;
         _hours = hours; _selected = selected; _squad = squad; _cats = cats;
-        _scan = scan; _enqueueAction = enqueueAction; _stateDir = stateDir; _camera = camera; _hud = hud;
+        _scan = scan; _enqueueAction = enqueueAction; _store = store; _camera = camera; _hud = hud;
         _limits = limits; _out = output; _log = log;
         LoadGrants();
         Discover();
@@ -306,7 +312,9 @@ public sealed class PackHost
         {
             box.Expose("", "after", a => RegisterTimer(p, a, repeat: false));
             box.Expose("", "every", a => RegisterTimer(p, a, repeat: true));
+            box.Expose("", "after_saved", a => RegisterSavedTimer(p, a));
         }
+        p.ManyTimers = granted.Contains("timers.many");
         if (granted.Contains("events")) box.Expose("", "on", a => RegisterEvent(p, a));
         if (granted.Contains("world.scan"))
         {
@@ -454,6 +462,8 @@ public sealed class PackHost
 
             foreach (var p in _packs.Values.OrderBy(x => x.Manifest.Id, StringComparer.OrdinalIgnoreCase))
             {
+                if (!p.Running || p.Box is null) continue;
+                if (used < GlobalTickBudget) used += FireSavedTimers(p, now, GlobalTickBudget - used);
                 if (!p.Running || p.Box is null || p.Timers.Count == 0) continue;
                 var due = p.Timers.Where(t => t.DueHour <= now).OrderBy(t => t.DueHour).ThenBy(t => t.Id).ToList();
                 foreach (var t in due)
@@ -562,6 +572,108 @@ public sealed class PackHost
         return DynValue.True;
     }
 
+    static int TimerCap(PackState p) => p.ManyTimers ? ManyTimers : MaxTimers;
+    static int HandlerCap(PackState p) => p.ManyTimers ? ManyHandlers : MaxHandlers;
+
+    /// <summary>A refusal the pack can read: `nil, reason` (Lua's own convention), never a fault (T1).</summary>
+    static DynValue Refused(string why) => DynValue.NewTuple(DynValue.Nil, DynValue.NewString(why));
+
+    static Table? SavedTimers(PackState p, bool create)
+    {
+        var g = p.Box!.RawScript.Globals;
+        var state = g.RawGet("state");
+        if (state is null || state.Type != DataType.Table)
+        {
+            if (!create) return null;
+            state = DynValue.NewTable(p.Box.RawScript);
+            g["state"] = state;
+        }
+        var list = state.Table.RawGet("__timers");
+        if (list is null || list.Type != DataType.Table)
+        {
+            if (!create) return null;
+            list = DynValue.NewTable(p.Box.RawScript);
+            state.Table["__timers"] = list;
+        }
+        return list.Table;
+    }
+
+    static int TimerCount(PackState p) => p.Timers.Count + (p.Box is null ? 0 : SavedTimers(p, create: false)?.Length ?? 0);
+
+    /// <summary>after_saved(hours, "fn", data): a one-shot timer kept as plain data in state.__timers, so it is saved and restored with the
+    /// pack's state (T2-T4). `fn` names a global function; `data` must be plain data (functions in it are dropped when saved).</summary>
+    DynValue RegisterSavedTimer(PackState p, CallbackArguments a)
+    {
+        if (a.Count < 2 || a[0].Type != DataType.Number || a[1].Type != DataType.String)
+            throw new ScriptRuntimeException("after_saved(hours, \"function_name\", data) expects a number of game hours and a function name");
+        double h = a[0].Number;
+        if (!double.IsFinite(h) || h < 0) throw new ScriptRuntimeException("timer hours must be >= 0");
+        string fn = a[1].String.Trim();
+        if (fn.Length == 0 || fn.Length > 64 || !(char.IsLetter(fn[0]) || fn[0] == '_') || fn.Any(c => !(char.IsLetterOrDigit(c) || c == '_')))
+            throw new ScriptRuntimeException("after_saved: the function name must be a plain global name (letters, digits, _)");
+        if (TimerCount(p) >= TimerCap(p)) return Refused($"after_saved: this pack already has {TimerCap(p)} timers (the cap; /allow <pack> timers.many raises it)");
+        var list = SavedTimers(p, create: true)!;
+        var state = p.Box!.RawScript.Globals.Get("state").Table;
+        double seq = (state.RawGet("__timer_seq") is { Type: DataType.Number } s ? s.Number : 0) + 1;
+        state["__timer_seq"] = seq;
+        double now = _hours() ?? (double.IsNaN(_lastHour) ? 0 : _lastHour);
+        var e = new Table(p.Box.RawScript);
+        e["due"] = now + h;
+        e["fn"] = fn;
+        e["seq"] = seq;
+        if (a.Count > 2 && !a[2].IsNil()) e["data"] = a[2];
+        list.Append(DynValue.NewTable(e));
+        return DynValue.NewNumber(seq);
+    }
+
+    /// <summary>Fire this pack's due saved timers in (due, seq) order, each once (T2); a missing function is dropped with a log line (T4).</summary>
+    long FireSavedTimers(PackState p, double now, long budgetLeft)
+    {
+        var list = SavedTimers(p, create: false);
+        if (list is null || list.Length == 0) return 0;
+        var due = new List<(double due, double seq, Table e)>();
+        foreach (var v in list.Values)
+            if (v.Type == DataType.Table && v.Table.RawGet("due") is { Type: DataType.Number } d && d.Number <= now)
+                due.Add((d.Number, v.Table.RawGet("seq") is { Type: DataType.Number } q ? q.Number : 0, v.Table));
+        if (due.Count == 0) return 0;
+        due.Sort((x, y) => x.due != y.due ? x.due.CompareTo(y.due) : x.seq.CompareTo(y.seq));
+        long used = 0;
+        foreach (var (_, _, e) in due)
+        {
+            if (!p.Running || p.Box is null || p.Box.Faulted) break;
+            if (used >= budgetLeft) { GlobalBudgetSkips++; break; }
+            RemoveEntry(list, e);   // removed before the call: it fires once even if the call faults (T2)
+            string fn = e.RawGet("fn")?.String ?? "";
+            if (p.Box.RawScript.Globals.RawGet(fn) is not { Type: DataType.Function })
+            {
+                _log($"pack '{p.Manifest.Id}': saved timer '{fn}' has no such function; dropped");
+                continue;
+            }
+            p.Box.Call(fn, e.RawGet("data") ?? DynValue.Nil);
+            used += p.Box.LastCallInstructions;
+            if (p.Box.Faulted)
+            {
+                _log($"pack '{p.Manifest.Id}' saved timer faulted: {p.Box.Fault}: {p.Box.FaultDetail}");
+                Stop(p.Manifest.Id);
+                break;
+            }
+        }
+        return used;
+    }
+
+    /// <summary>Remove one entry from a Lua array table, keeping the order of the rest (a plain list, so `#` stays right).</summary>
+    static void RemoveEntry(Table list, Table e)
+    {
+        int n = list.Length;
+        for (int i = 1; i <= n; i++)
+        {
+            if (!ReferenceEquals(list.Get(i).Table, e)) continue;
+            for (int j = i; j < n; j++) list.Set(j, list.Get(j + 1));
+            list.Set(n, DynValue.Nil);
+            return;
+        }
+    }
+
     DynValue RegisterTimer(PackState p, CallbackArguments a, bool repeat)
     {
         if (a.Count < 2 || a[0].Type != DataType.Number || a[1].Type != DataType.Function)
@@ -569,6 +681,7 @@ public sealed class PackHost
         double h = a[0].Number;
         if (!double.IsFinite(h) || h < 0) throw new ScriptRuntimeException("timer hours must be >= 0");
         if (repeat) h = Math.Max(0.01, h);
+        if (TimerCount(p) >= TimerCap(p)) return Refused($"{(repeat ? "every" : "after")}: this pack already has {TimerCap(p)} timers (the cap; /allow <pack> timers.many raises it)");
         double now = _hours() ?? (double.IsNaN(_lastHour) ? 0 : _lastHour);
         long id = ++_nextTimerId;
         p.Timers.Add(new TimerEntry { Id = id, DueHour = now + h, Interval = repeat ? h : 0, Fn = a[1] });
@@ -582,6 +695,8 @@ public sealed class PackHost
         string name = a[0].String.Trim().ToLowerInvariant();
         if (!AllowedEvents.Contains(name))
             throw new ScriptRuntimeException($"on: unknown event '{name}' (allowed: {string.Join(", ", AllowedEvents.OrderBy(x => x))})");
+        int handlers = p.Events.Values.Sum(l => l.Count);
+        if (handlers >= HandlerCap(p)) return Refused($"on: this pack already has {HandlerCap(p)} event handlers (the cap; /allow <pack> timers.many raises it)");
         if (!p.Events.TryGetValue(name, out var list)) p.Events[name] = list = [];
         list.Add(a[1]);
         return DynValue.True;
@@ -785,19 +900,14 @@ public sealed class PackHost
         return DynValue.True;
     }
 
-    // ---------------------------------------------------------------- pack.save (0.4.0 C7-safe persistence)
+    // ---------------------------------------------------------------- pack.save (0.4.0 C7-safe persistence; per save since 0.12.0, C7b)
 
-    string? StateFilePath(string id)
-    {
-        if (string.IsNullOrEmpty(_stateDir)) return null;
-        return HostedScript.SafePath(_stateDir, id.ToLowerInvariant() + ".bin");
-    }
+    /// <summary>The store packs save into; held per save (PackStore, PackSaveSystem). Null: pack.save keeps nothing.</summary>
+    public PackStore? Store => _store;
 
     bool SavePackState(PackState p)
     {
-        if (p.Box is null || p.Box.Faulted) return false;
-        string? path = StateFilePath(p.Manifest.Id);
-        if (path is null) return false;
+        if (p.Box is null || p.Box.Faulted || _store is null) return false;
         try
         {
             byte[] data = p.Box.Save();
@@ -806,8 +916,8 @@ public sealed class PackHost
                 _log($"pack '{p.Manifest.Id}': state too large to save ({data.Length} > {MaxPackSaveBytes} bytes)");
                 return false;
             }
-            Directory.CreateDirectory(_stateDir!);
-            File.WriteAllBytes(path, data);
+            if (data.Length == 0) return false;
+            if (!_store.Set(PackStore.Key(p.Manifest.Id), data)) { _log($"pack '{p.Manifest.Id}': state not kept (the store is full)"); return false; }
             return true;
         }
         catch (Exception e) { _log($"pack '{p.Manifest.Id}': save failed: {e.Message}"); return false; }
@@ -815,16 +925,38 @@ public sealed class PackHost
 
     void LoadPackState(PackState p)
     {
-        if (p.Box is null || p.Box.Faulted) return;
-        string? path = StateFilePath(p.Manifest.Id);
-        if (path is null || !File.Exists(path)) return;
-        try
-        {
-            var fi = new FileInfo(path);
-            if (fi.Length == 0 || fi.Length > MaxPackSaveBytes) return;
-            p.Box.Restore(File.ReadAllBytes(path));
-        }
+        if (p.Box is null || p.Box.Faulted || _store is null) return;
+        if (_store.Get(PackStore.Key(p.Manifest.Id)) is not { Length: > 0 } data) return;
+        try { p.Box.Restore(data); }
         catch (Exception e) { _log($"pack '{p.Manifest.Id}': saved state ignored: {e.Message}"); }
+    }
+
+    /// <summary>
+    /// A new world is running (C7b), step 1: every running pack stops (its state goes to the old world's store, which nobody writes any
+    /// more). Then the caller replaces the store's entries (PackStore.Replace) and calls <see cref="StartAgain"/>. Interface side only.
+    /// </summary>
+    public IReadOnlyList<string> StopRunning()
+    {
+        var running = _packs.Values.Where(x => x.Running).Select(x => x.Manifest.Id).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var id in running) Stop(id);
+        _lastHour = double.NaN;
+        return running;
+    }
+
+    /// <summary>Step 2: the same packs start again, each restoring its own entry of the new world's store, or none.</summary>
+    public IReadOnlyList<string> StartAgain(IReadOnlyList<string> ids)
+    {
+        var started = new List<string>();
+        foreach (var id in ids) if (Start(id).ok) started.Add(id);
+        return started;
+    }
+
+    /// <summary>Both steps for a host that has the store to itself (the checks and the fuzz harness).</summary>
+    public IReadOnlyList<string> SwitchWorld(Dictionary<string, byte[]> entries)
+    {
+        var running = StopRunning();
+        _store?.Replace(entries);
+        return StartAgain(running);
     }
 
     // ---------------------------------------------------------------- camera.read & ui.hud (0.5.0)

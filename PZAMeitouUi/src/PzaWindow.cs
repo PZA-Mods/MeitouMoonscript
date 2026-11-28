@@ -33,6 +33,9 @@ public sealed class PzaWindow(string id, Func<string> layoutXml, bool modal = fa
     /// button, Kenshi_WindowCXM), and the "-" button or a double click on the title closes it and calls <see cref="Minimized"/> (the mod's tiny
     /// button shows while the window is closed, and its "+" opens it again).</summary>
     public bool Minimizable { get; init; }
+    /// <summary>A HUD panel: registered via <c>MyGuiScreenHost.RegisterPanel</c> when available, so it draws under windows, is never raised,
+    /// and is never closed by Escape (so Escape still opens Meitou's pause/game menu).</summary>
+    public bool Panel { get; init; }
     /// <summary>Called after the window was minimized ("-" or a title double click).</summary>
     public Action? Minimized { get; set; }
 
@@ -78,9 +81,18 @@ public sealed class PzaWindow(string id, Func<string> layoutXml, bool modal = fa
             if (!host.IsRegistered(Id))
             {
                 var layout = MyGuiReader.ParseLayout(layoutXml());
-                host.Register(Id, layout, Modal);
+                bool registeredAsPanel = false;
+                if (Panel && host.GetType().GetMethod("RegisterPanel", [typeof(string), typeof(MyGuiLayout)]) is { } regPanel)
+                {
+                    regPanel.Invoke(host, [Id, layout]);
+                    registeredAsPanel = true;
+                }
+                else
+                {
+                    host.Register(Id, layout, Modal);
+                }
                 host.Activated += OnEvent;
-                PzaUi.Log($"PZA's Meitou UI: window '{Id}' registered ({layout.Widgets.Count} top widgets{(Modal ? ", modal" : "")}{(Minimizable ? ", minimizable" : "")})");
+                PzaUi.Log($"PZA's Meitou UI: window '{Id}' registered ({layout.Widgets.Count} top widgets{(registeredAsPanel ? ", panel" : "")}{(Modal ? ", modal" : "")}{(Minimizable ? ", minimizable" : "")})");
             }
             if (host.Layout(Id).Widgets.FirstOrDefault(w => w.Type == "Window") is { } rootWidget) _root = rootWidget.Name;
         }

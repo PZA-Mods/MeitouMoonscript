@@ -113,7 +113,42 @@ function WidgetMT:setImageCoord(x, y, w, h)
   if self._visible then self:_sync() end
 end
 function WidgetMT:setImageTile(w, h) self._tileW = w; self._tileH = h end
-function WidgetMT:setImageIndex(i) self._imgIdx = i or 0 end
+function WidgetMT:setImageInfo(file, x, y, sheetW, sheetH, tileW, tileH)
+  self._texture = tostring(file or "")
+  self._sheetX = math.floor(x or 0)
+  self._sheetY = math.floor(y or 0)
+  self._sheetW = math.max(1, math.floor(sheetW or tileW or 1))
+  self._sheetH = math.max(1, math.floor(sheetH or tileH or 1))
+  self._tileW = math.max(1, math.floor(tileW or self._sheetW))
+  self._tileH = math.max(1, math.floor(tileH or self._sheetH))
+  self._rect = string.format("%d %d %d %d", self._sheetX, self._sheetY, self._tileW, self._tileH)
+  if self._visible then self:_sync() end
+end
+function WidgetMT:setImageIndex(i)
+  self._imgIdx = math.max(0, math.floor(tonumber(i) or 0))
+  if self._sheetW and self._tileW and self._tileW > 0 and self._tileH and self._tileH > 0 then
+    local cols = math.max(1, math.floor(self._sheetW / self._tileW))
+    local col = self._imgIdx % cols
+    local row = math.floor(self._imgIdx / cols)
+    self._rect = string.format("%d %d %d %d", (self._sheetX or 0) + col * self._tileW, (self._sheetY or 0) + row * self._tileH, self._tileW, self._tileH)
+    if self._visible then self:_sync() end
+  end
+end
+function WidgetMT:getCoord() return self._x, self._y, self._w, self._h end
+function WidgetMT:setMovable(_) end
+function WidgetMT:setEnabled(v) self._enabled = (v == true) end
+function WidgetMT:getEnabled() return self._enabled ~= false end
+function WidgetMT:createWidget(wtype, skin, x, y, w, h, a6, a7, a8)
+  return MyGUI.createWidget(wtype, skin, (self._x or 0) + (x or 0), (self._y or 0) + (y or 0), w, h, a6, a7, a8)
+end
+function WidgetMT:setProperty(k, v)
+  if k == "Caption" then self:setCaption(v)
+  elseif k == "Alpha" then self:setAlpha(tonumber(v) or 1)
+  elseif k == "Visible" then self:setVisible(v == true or v == "true")
+  elseif k == "Colour" then self:setColour(v)
+  elseif k == "TextColour" then self:setTextColour(v)
+  end
+end
 function WidgetMT:setFontName(f) self._font = tostring(f or "") end
 function WidgetMT:setTextAlign(a) self._align = a; if self._visible then self:_sync() end end
 function WidgetMT:setNeedMouseFocus(_) end
@@ -189,6 +224,8 @@ end
         if (!string.IsNullOrEmpty(modFolder))
         {
             string clean = rawTex.Trim().Replace('\\', '/');
+            string normRoot = modFolder.TrimEnd('\\', '/').Replace('\\', '/') + "/";
+            if (clean.StartsWith(normRoot, StringComparison.OrdinalIgnoreCase)) clean = clean[normRoot.Length..];
             string[] candidates = ["gui/gfx/" + clean, "gui/" + clean, "ui/" + clean, clean];
             foreach (var rel in candidates)
             {
